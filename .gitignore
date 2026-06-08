@@ -1,0 +1,6 @@
+# Credential files
+credentials.json
+token.json
+
+# Log files
+*.log

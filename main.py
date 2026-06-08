@@ -1,0 +1,360 @@
+import base64
+import os.path
+import sys
+import time
+import re
+import html as html_lib
+import ctypes
+import logging
+from logging.handlers import RotatingFileHandler
+import pyperclip
+import platform
+import email
+from email.header import decode_header, make_header
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+# History/labels we never want to act on (your own outgoing/test mail).
+# Only act on mail that actually landed in the inbox. This correctly handles
+# self-sent test emails (which carry SENT *and* INBOX) and ignores the
+# draft/trash intermediates Gmail creates while composing/forwarding.
+REQUIRE_LABEL = "INBOX"
+
+# Only copy/beep when you've used the keyboard/mouse within this many seconds.
+# When you've been away longer (e.g. doing the verification on your phone), new
+# codes are silently skipped. Raise this if it ever skips a code you wanted.
+IDLE_LIMIT_SECONDS = 60
+
+
+def idle_seconds():
+    """Seconds since the last keyboard/mouse input on Windows; 0 elsewhere
+    (so non-Windows always counts as 'active')."""
+    if platform.system() != "Windows":
+        return 0.0
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+    info = LASTINPUTINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+    # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount wraparound,
+    # which matters since this machine stays on continuously.
+    millis = (tick - info.dwTime) & 0xFFFFFFFF
+    return millis / 1000.0
+
+
+def decode_hdr(value):
+    """Decode an RFC2047-encoded header (e.g. =?UTF-8?B?...?=) to plain text."""
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value
+
+
+def extract_code(subject, body):
+    """Pull a verification code or magic link out of an email using regex.
+
+    Strategy: find every standalone 4-8 digit run, score each by how close it
+    sits to a verification keyword on EITHER side, and return the closest one.
+    This avoids grabbing reference numbers/dates/amounts, and handles subjects
+    where the number comes before the word 'code'. Falls back to a magic link.
+    """
+    text = (subject or "") + "\n" + (body or "")
+
+    # Require a *strong* verification signal near the number. Bare words like
+    # "code"/"pin" are NOT enough on their own (they match "Internal Revenue
+    # Code", "promo code", "zip code", etc.). They only count in verification
+    # phrasings: "verification code", "your code", "code:", "code is", "PIN is".
+    KW = re.compile(
+        r"verification|verify|passcode|one[\s-]?time|\botp\b|authenticat|2fa"
+        r"|(?:your|this|the|enter|following|security|login|access|confirmation|sign[\s-]?in)\s+(?:code|pin)"
+        r"|(?:code|pin)\s*[:=]"
+        r"|(?:code|pin)\s+(?:is|are|was|below)\b",
+        re.IGNORECASE,
+    )
+    WINDOW = 50  # chars between keyword and code; real phrasing can be long
+
+    # Strip URLs before the digit search: tracking links are full of arbitrary
+    # numbers (e.g. ?at=1000lwu3) sitting next to words like 'verify' that would
+    # otherwise beat the real code. Links are still handled by the fallback below.
+    text_no_urls = re.sub(r"https?://\S+", " ", text)
+
+    best = None
+    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", text_no_urls):
+        s, e = m.start(), m.end()
+        before = text_no_urls[max(0, s - WINDOW):s]
+        after = text_no_urls[e:e + WINDOW]
+        dist = None
+        for km in KW.finditer(before):
+            d = len(before) - km.end()
+            dist = d if dist is None else min(dist, d)
+        for km in KW.finditer(after):
+            d = km.start()
+            dist = d if dist is None else min(dist, d)
+        if dist is None:
+            continue
+        digits = m.group(1)
+        # Closest keyword wins; tie-break toward 6-digit codes, then position.
+        score = (dist, 0 if len(digits) == 6 else 1, s)
+        if best is None or score < best[0]:
+            best = (score, digits)
+    if best:
+        return best[1]
+
+    # Magic-link fallback: only when the email actually looks verification-y,
+    # and only for a genuine sign-in link -- not an unsubscribe/preferences URL
+    # (those often contain "login"/"email" and were causing false positives).
+    if KW.search(text):
+        for lm in re.finditer(r"https?://\S+", text):
+            u = lm.group()
+            if re.search(r"verify|magic|token|otp|confirm|sign[-_]?in", u, re.IGNORECASE) \
+               and not re.search(r"unsubscrib|preferenc|revoke|optout|opt-out|manage|email",
+                                 u, re.IGNORECASE):
+                return u.rstrip(").,>\"']}")
+
+    return None
+
+
+# Custom "OTP copied" chime, expected next to this script.
+SOUND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_chime.wav")
+
+
+def beep():
+    """Play the distinct OTP chime. Falls back to a system sound if missing."""
+    system = platform.system()
+    have_file = os.path.exists(SOUND_FILE)
+    try:
+        if system == "Windows":
+            import winsound  # stdlib, Windows only
+            if have_file:
+                winsound.PlaySound(SOUND_FILE,
+                                   winsound.SND_FILENAME | winsound.SND_ASYNC)
+            else:
+                winsound.MessageBeep()
+        elif system == "Darwin":
+            os.system(f'afplay "{SOUND_FILE}"' if have_file
+                      else "afplay /System/Library/Sounds/Glass.aiff")
+        else:  # Linux/other
+            if have_file and os.system(f'aplay -q "{SOUND_FILE}" 2>/dev/null') != 0:
+                os.system(f'paplay "{SOUND_FILE}" 2>/dev/null')
+            elif not have_file:
+                print("\a", end="", flush=True)  # terminal bell
+    except Exception as e:
+        print(f"(beep failed: {e})")
+
+
+def process_email(subject, body):
+    code = extract_code(subject, body)
+    if not code:
+        print("No validation code or link found in the email")
+        return
+    pyperclip.copy(code)
+    print("Copied to clipboard:", code)
+    beep()
+
+
+def get_body(mime_msg):
+    """Return the best-effort plain-text body of an email.
+
+    Prefers text/plain. Falls back to text/html with tags and style/script
+    blocks stripped and HTML entities unescaped, so the regex sees real text.
+    """
+    plain_parts = []
+    html_parts = []
+
+    if mime_msg.is_multipart():
+        for part in mime_msg.walk():
+            ctype = part.get_content_type()
+            if ctype not in ("text/plain", "text/html"):
+                continue
+            payload = part.get_payload(decode=True)  # decode transfer-encoding
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            txt = payload.decode(charset, errors="replace")
+            (plain_parts if ctype == "text/plain" else html_parts).append(txt)
+    else:
+        payload = mime_msg.get_payload(decode=True)
+        if payload is not None:
+            charset = mime_msg.get_content_charset() or "utf-8"
+            txt = payload.decode(charset, errors="replace")
+            if mime_msg.get_content_type() == "text/html":
+                html_parts.append(txt)
+            else:
+                plain_parts.append(txt)
+
+    if plain_parts:
+        return "\n".join(plain_parts)
+    if html_parts:
+        raw = "\n".join(html_parts)
+        raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw,
+                     flags=re.DOTALL | re.IGNORECASE)
+        raw = re.sub(r"<[^>]+>", " ", raw)
+        return html_lib.unescape(raw)
+    return ""
+
+
+def fetch_email(email_id, creds):
+    service = build("gmail", "v1", credentials=creds)
+    msg = service.users().messages().get(
+        userId="me", id=email_id, format="raw").execute()
+    try:
+        mime_msg = email.message_from_bytes(base64.urlsafe_b64decode(msg["raw"]))
+        subject = decode_hdr(mime_msg["subject"])
+        from_name = decode_hdr(mime_msg["from"])
+        body = get_body(mime_msg)
+        print(f"From: {from_name}\nSubject: {subject}\nBody length: {len(body)}")
+    except Exception as e:
+        print(f"An error occurred parsing email: {e}")
+        return
+    process_email(subject, body)
+
+
+def poll_for_new_emails(creds):
+    service = build("gmail", "v1", credentials=creds)
+    user_id = "me"
+    start_history_id = service.users().getProfile(
+        userId=user_id).execute()["historyId"]
+
+    while True:
+        try:
+            changes = []
+            page_token = None
+            while True:
+                resp = service.users().history().list(
+                    userId=user_id,
+                    startHistoryId=start_history_id,
+                    pageToken=page_token,
+                ).execute()
+                changes.extend(resp.get("history", []))
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
+            # resp is the last page; its historyId is the newest checkpoint.
+            start_history_id = resp["historyId"]
+
+            seen = set()  # avoid double-processing within one batch
+            for change in changes:
+                for added in change.get("messagesAdded", []):
+                    msg = added["message"]
+                    mid = msg["id"]
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    labels = set(msg.get("labelIds", []))
+                    print(f"detected {mid} labels={sorted(labels)}")
+                    if REQUIRE_LABEL not in labels:
+                        continue  # not in inbox (draft/trash/etc.)
+                    idle = idle_seconds()
+                    if idle > IDLE_LIMIT_SECONDS:
+                        # Away from the computer: skip silently. History still
+                        # advances below, so we won't replay this on return.
+                        print(f"skipping {mid} (idle {int(idle)}s)")
+                        continue
+                    fetch_email(mid, creds)
+
+            time.sleep(0.8)
+
+        except HttpError as error:
+            if error.resp.status == 404:
+                # startHistoryId expired/too old: resync to current.
+                start_history_id = service.users().getProfile(
+                    userId=user_id).execute()["historyId"]
+                print("History expired; resynced.")
+            else:
+                print(f"HTTP error, retrying: {error}")
+                time.sleep(2)
+        except Exception as error:
+            print(f"An error occurred, retrying: {error}")
+            time.sleep(2)
+
+
+class _StreamToLogger:
+    """Minimal writable-stream shim so existing print()/tracebacks flow into a
+    rotating log. Buffers partial writes and emits one log record per line."""
+    def __init__(self, logger, level):
+        self.logger = logger
+        self.level = level
+        self._buf = ""
+
+    def write(self, msg):
+        self._buf += msg
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line:
+                self.logger.log(self.level, line)
+
+    def flush(self):
+        if self._buf:
+            self.logger.log(self.level, self._buf)
+            self._buf = ""
+
+    def isatty(self):
+        return False
+
+
+def setup_logging():
+    """When launched in the background, route output to a size-capped rotating
+    logfile next to the script so it can never fill the disk (~4 MB max total).
+    The launcher passes --background; we also fall back to detecting a missing
+    console. Manual console runs are left untouched so you see live output."""
+    force = "--background" in sys.argv
+    try:
+        interactive = sys.stdout is not None and sys.stdout.isatty()
+    except Exception:
+        interactive = False
+    if interactive and not force:
+        return
+    here = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(here, "otp_watcher.log")
+
+    logger = logging.getLogger("otp_watcher")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:  # avoid duplicate handlers if called twice
+        # 1 MB per file, 3 old files kept -> at most ~4 MB on disk, ever.
+        handler = RotatingFileHandler(
+            log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(handler)
+
+    sys.stdout = _StreamToLogger(logger, logging.INFO)
+    sys.stderr = _StreamToLogger(logger, logging.ERROR)
+    print("--- watcher started ---")
+
+
+def main():
+    setup_logging()
+    creds = None
+    SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+    # Resolve these next to the script, not the current working directory, so
+    # it works when launched from Startup/Task Scheduler (CWD = System32 etc.).
+    here = os.path.dirname(os.path.abspath(__file__))
+    token_path = os.path.join(here, "token.json")
+    creds_path = os.path.join(here, "credentials.json")
+    if os.path.exists(token_path):
+        # If modifying these scopes, delete the file token.json.
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                creds_path, SCOPES)
+            creds = flow.run_local_server(port=54461, open_browser=False)
+        with open(token_path, "w") as token:
+            token.write(creds.to_json())
+
+    print("Started Gmail agent, monitoring")
+    poll_for_new_emails(creds)
+
+
+if __name__ == "__main__":
+    main()
