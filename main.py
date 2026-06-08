@@ -4,7 +4,9 @@ import sys
 import time
 import re
 import html as html_lib
+import datetime
 import ctypes
+import subprocess
 import logging
 from logging.handlers import RotatingFileHandler
 import pyperclip
@@ -31,21 +33,34 @@ IDLE_LIMIT_SECONDS = 60
 
 
 def idle_seconds():
-    """Seconds since the last keyboard/mouse input on Windows; 0 elsewhere
-    (so non-Windows always counts as 'active')."""
-    if platform.system() != "Windows":
+    """Seconds since the last keyboard/mouse input. Supports Windows and macOS;
+    returns 0 on other systems (so they always count as 'active')."""
+    system = platform.system()
+    if system == "Windows":
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+        # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount
+        # wraparound, which matters since this machine stays on continuously.
+        millis = (tick - info.dwTime) & 0xFFFFFFFF
+        return millis / 1000.0
+    if system == "Darwin":
+        # HIDIdleTime = nanoseconds since the last HID (keyboard/mouse) event.
+        try:
+            out = subprocess.run(
+                ["ioreg", "-c", "IOHIDSystem", "-d", "4"],
+                capture_output=True, text=True, timeout=5).stdout
+            m = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', out)
+            if m:
+                return int(m.group(1)) / 1_000_000_000.0  # ns -> s
+        except Exception as e:
+            print(f"(idle check failed: {e})")
         return 0.0
-    class LASTINPUTINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
-    info = LASTINPUTINFO()
-    info.cbSize = ctypes.sizeof(info)
-    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
-        return 0.0
-    tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
-    # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount wraparound,
-    # which matters since this machine stays on continuously.
-    millis = (tick - info.dwTime) & 0xFFFFFFFF
-    return millis / 1000.0
+    return 0.0
 
 
 def decode_hdr(value):
@@ -151,13 +166,15 @@ def beep():
 
 
 def process_email(subject, body):
+    """Copy the code and beep. Returns True if a code was found/copied."""
     code = extract_code(subject, body)
     if not code:
         print("No validation code or link found in the email")
-        return
+        return False
     pyperclip.copy(code)
     print("Copied to clipboard:", code)
     beep()
+    return True
 
 
 def get_body(mime_msg):
@@ -214,7 +231,15 @@ def fetch_email(email_id, creds):
     except Exception as e:
         print(f"An error occurred parsing email: {e}")
         return
-    process_email(subject, body)
+    # copied = process_email(subject, body)
+    # if copied:
+    #     # Move to Trash (recoverable for 30 days). Requires the gmail.modify
+    #     # scope; failures here are logged but don't affect the copied code.
+    #     try:
+    #         service.users().messages().trash(userId="me", id=email_id).execute()
+    #         print(f"Trashed {email_id}")
+    #     except Exception as e:
+    #         print(f"Could not trash {email_id}: {e}")
 
 
 def poll_for_new_emails(creds):
@@ -330,10 +355,43 @@ def setup_logging():
     print("--- watcher started ---")
 
 
+_mutex_handle = None  # Windows: kept alive for the process lifetime
+_lock_file = None     # macOS/POSIX: kept open to hold the flock
+
+
+def ensure_single_instance():
+    """Exit immediately if another copy of the watcher is already running.
+    Prevents duplicate beepers no matter how many times it gets launched."""
+    global _mutex_handle, _lock_file
+    system = platform.system()
+    if system == "Windows":
+        ERROR_ALREADY_EXISTS = 183
+        k32 = ctypes.windll.kernel32
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        _mutex_handle = k32.CreateMutexW(None, False, "OTP_Watcher_single_instance_v1")
+        if k32.GetLastError() == ERROR_ALREADY_EXISTS:
+            print("Another instance is already running; exiting.")
+            sys.exit(0)
+    else:
+        # POSIX (macOS/Linux): hold an exclusive, non-blocking flock on a lock
+        # file. The OS releases it automatically when the process dies, so there
+        # is no stale lock to clean up. Keep the file object alive in a global.
+        import fcntl
+        here = os.path.dirname(os.path.abspath(__file__))
+        _lock_file = open(os.path.join(here, "otp_watcher.lock"), "w")
+        try:
+            fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("Another instance is already running; exiting.")
+            sys.exit(0)
+
+
 def main():
     setup_logging()
+    ensure_single_instance()
     creds = None
-    SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+    SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
     # Resolve these next to the script, not the current working directory, so
     # it works when launched from Startup/Task Scheduler (CWD = System32 etc.).
     here = os.path.dirname(os.path.abspath(__file__))
