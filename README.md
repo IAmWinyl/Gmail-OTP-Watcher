@@ -116,3 +116,4 @@ launchctl unload ~/Library/LaunchAgents/com.your_name.gmailotpwatcher.plist # st
 ## Credit
 
 This is mostly vibe-coded with Claude Code Opus 4.8
+Got the idea from https://github.com/mhaowork/verigood but didn't want the AI part.
