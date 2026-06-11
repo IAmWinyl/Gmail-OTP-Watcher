@@ -3,6 +3,7 @@ import os.path
 import sys
 import time
 import re
+import unicodedata
 import html as html_lib
 import datetime
 import ctypes
@@ -73,6 +74,29 @@ def decode_hdr(value):
         return value
 
 
+def to_readable_text(s):
+    """Reduce a string to the plain text a human would read, so rendering
+    artifacts (URLs, CRLF/tab padding, &nbsp;, full-width digits, ...) can't
+    inflate the keyword-to-code distance the matcher scores on."""
+    if not s:
+        return ""
+    
+    # Drop URLs 
+    s = re.sub(r"https?://\S+", " ", s)
+
+    # Normalize to NFKC
+    s = unicodedata.normalize("NFKC", s)
+
+    # Drop zero-width and other format/control chars
+    s = "".join(
+        ch for ch in s
+        if ch in "\t\n\r" or not unicodedata.category(ch).startswith("C")
+    )
+
+    # Collapse whitespace
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def extract_code(subject, body):
     """Pull a verification code or magic link out of an email using regex.
 
@@ -94,18 +118,16 @@ def extract_code(subject, body):
         r"|(?:code|pin)\s+(?:is|are|was|below)\b",
         re.IGNORECASE,
     )
-    WINDOW = 50  # chars between keyword and code; real phrasing can be long
+    WINDOW = 50  # chars between keyword and code
 
-    # Strip URLs before the digit search: tracking links are full of arbitrary
-    # numbers (e.g. ?at=1000lwu3) sitting next to words like 'verify' that would
-    # otherwise beat the real code. Links are still handled by the fallback below.
-    text_no_urls = re.sub(r"https?://\S+", " ", text)
+    # Canonicalize so distance reflects words, not markup
+    clean_text = to_readable_text(text)
 
     best = None
-    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", text_no_urls):
+    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", clean_text):
         s, e = m.start(), m.end()
-        before = text_no_urls[max(0, s - WINDOW):s]
-        after = text_no_urls[e:e + WINDOW]
+        before = clean_text[max(0, s - WINDOW):s]
+        after = clean_text[e:e + WINDOW]
         dist = None
         for km in KW.finditer(before):
             d = len(before) - km.end()
