@@ -413,7 +413,7 @@ def main():
     setup_logging()
     ensure_single_instance()
     creds = None
-    SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+    SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
     # Resolve these next to the script, not the current working directory, so
     # it works when launched from Startup/Task Scheduler (CWD = System32 etc.).
     here = os.path.dirname(os.path.abspath(__file__))
