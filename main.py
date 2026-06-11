@@ -176,12 +176,15 @@ def beep():
             else:
                 winsound.MessageBeep()
         elif system == "Darwin":
-            os.system(f'afplay "{SOUND_FILE}"' if have_file
-                      else "afplay /System/Library/Sounds/Glass.aiff")
+            sound = SOUND_FILE if have_file else "/System/Library/Sounds/Glass.aiff"
+            subprocess.run(["afplay", sound])
         else:  # Linux/other
-            if have_file and os.system(f'aplay -q "{SOUND_FILE}" 2>/dev/null') != 0:
-                os.system(f'paplay "{SOUND_FILE}" 2>/dev/null')
-            elif not have_file:
+            if have_file:
+                # Try ALSA, fall back to PulseAudio
+                if subprocess.run(["aplay", "-q", SOUND_FILE],
+                                  stderr=subprocess.DEVNULL).returncode != 0:
+                    subprocess.run(["paplay", SOUND_FILE], stderr=subprocess.DEVNULL)
+            else:
                 print("\a", end="", flush=True)  # terminal bell
     except Exception as e:
         print(f"(beep failed: {e})")
