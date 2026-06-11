@@ -418,7 +418,10 @@ def main():
             token.write(creds.to_json())
 
     print("Started Gmail agent, monitoring")
-    poll_for_new_emails(creds)
+    try:
+        poll_for_new_emails(creds)
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 if __name__ == "__main__":
