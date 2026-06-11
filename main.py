@@ -45,10 +45,10 @@ def idle_seconds():
         if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
             return 0.0
         tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
-        # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount
-        # wraparound, which matters since this machine stays on continuously.
+        # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount wraparound
         millis = (tick - info.dwTime) & 0xFFFFFFFF
         return millis / 1000.0
+
     if system == "Darwin":
         # HIDIdleTime = nanoseconds since the last HID (keyboard/mouse) event.
         try:
@@ -80,8 +80,8 @@ def to_readable_text(s):
     inflate the keyword-to-code distance the matcher scores on."""
     if not s:
         return ""
-    
-    # Drop URLs 
+
+    # Drop URLs
     s = re.sub(r"https?://\S+", " ", s)
 
     # Normalize to NFKC
@@ -107,10 +107,7 @@ def extract_code(subject, body):
     """
     text = (subject or "") + "\n" + (body or "")
 
-    # Require a *strong* verification signal near the number. Bare words like
-    # "code"/"pin" are NOT enough on their own (they match "Internal Revenue
-    # Code", "promo code", "zip code", etc.). They only count in verification
-    # phrasings: "verification code", "your code", "code:", "code is", "PIN is".
+    # Require a verification signal near the numbers
     KW = re.compile(
         r"verification|verify|passcode|one[\s-]?time|\botp\b|authenticat|2fa"
         r"|(?:your|this|the|enter|following|security|login|access|confirmation|sign[\s-]?in)\s+(?:code|pin)"
@@ -128,6 +125,7 @@ def extract_code(subject, body):
         s, e = m.start(), m.end()
         before = clean_text[max(0, s - WINDOW):s]
         after = clean_text[e:e + WINDOW]
+        # Distance to the nearest keyword on either side
         dist = None
         for km in KW.finditer(before):
             d = len(before) - km.end()
@@ -137,17 +135,17 @@ def extract_code(subject, body):
             dist = d if dist is None else min(dist, d)
         if dist is None:
             continue
+
+        # Closest keyword wins; tie-break toward 6-digit codes, then position
         digits = m.group(1)
-        # Closest keyword wins; tie-break toward 6-digit codes, then position.
         score = (dist, 0 if len(digits) == 6 else 1, s)
         if best is None or score < best[0]:
             best = (score, digits)
     if best:
         return best[1]
 
-    # Magic-link fallback: only when the email actually looks verification-y,
-    # and only for a genuine sign-in link -- not an unsubscribe/preferences URL
-    # (those often contain "login"/"email" and were causing false positives).
+    # Magic-link fallback: a genuine sign-in link, not an unsubscribe/preferences
+    # URL (those contain "login"/"email" and caused false positives)
     if KW.search(text):
         for lm in re.finditer(r"https?://\S+", text):
             u = lm.group()
@@ -169,13 +167,13 @@ def beep():
     have_file = os.path.exists(SOUND_FILE)
     try:
         if system == "Windows":
-            import winsound  # stdlib, Windows only
+            import winsound
             if have_file:
                 winsound.PlaySound(SOUND_FILE,
                                    winsound.SND_FILENAME | winsound.SND_ASYNC)
             else:
                 winsound.MessageBeep()
-        elif system == "Darwin":
+        elif system == "Darwin": # MacOS
             sound = SOUND_FILE if have_file else "/System/Library/Sounds/Glass.aiff"
             subprocess.run(["afplay", sound])
         else:  # Linux/other
@@ -278,10 +276,9 @@ def poll_for_new_emails(creds):
                 page_token = resp.get("nextPageToken")
                 if not page_token:
                     break
-            # resp is the last page; its historyId is the newest checkpoint.
             start_history_id = resp["historyId"]
 
-            seen = set()  # avoid double-processing within one batch
+            seen = set()
             for change in changes:
                 for added in change.get("messagesAdded", []):
                     msg = added["message"]
@@ -295,8 +292,7 @@ def poll_for_new_emails(creds):
                         continue  # not in inbox (draft/trash/etc.)
                     idle = idle_seconds()
                     if idle > IDLE_LIMIT_SECONDS:
-                        # Away from the computer: skip silently. History still
-                        # advances below, so we won't replay this on return.
+                        # Skip silently; history still advances so it won't replay
                         print(f"skipping {mid} (idle {int(idle)}s)")
                         continue
                     fetch_email(mid, creds)
@@ -343,9 +339,7 @@ class _StreamToLogger:
 
 def setup_logging():
     """When launched in the background, route output to a size-capped rotating
-    logfile next to the script so it can never fill the disk (~4 MB max total).
-    The launcher passes --background; we also fall back to detecting a missing
-    console. Manual console runs are left untouched so you see live output."""
+    logfile next to the script so it can never fill the disk."""
     force = "--background" in sys.argv
     try:
         interactive = sys.stdout is not None and sys.stdout.isatty()
@@ -390,9 +384,8 @@ def ensure_single_instance():
             print("Another instance is already running; exiting.")
             sys.exit(0)
     else:
-        # POSIX (macOS/Linux): hold an exclusive, non-blocking flock on a lock
-        # file. The OS releases it automatically when the process dies, so there
-        # is no stale lock to clean up. Keep the file object alive in a global.
+        # POSIX: non-blocking flock, auto-released by the OS on exit (no stale
+        # lock). Keep the file object alive in a global.
         import fcntl
         here = os.path.dirname(os.path.abspath(__file__))
         _lock_file = open(os.path.join(here, "otp_watcher.lock"), "w")
@@ -408,13 +401,15 @@ def main():
     ensure_single_instance()
     creds = None
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-    # Resolve these next to the script, not the current working directory, so
-    # it works when launched from Startup/Task Scheduler (CWD = System32 etc.).
+
+    # Resolve paths next to the script so it works when launched from
+    # Task Scheduler/launchd (CWD = System32 etc.)
     here = os.path.dirname(os.path.abspath(__file__))
     token_path = os.path.join(here, "token.json")
     creds_path = os.path.join(here, "credentials.json")
+
     if os.path.exists(token_path):
-        # If modifying these scopes, delete the file token.json.
+        # Delete token.json if you change SCOPES
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
