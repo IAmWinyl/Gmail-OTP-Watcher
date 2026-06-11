@@ -249,6 +249,8 @@ def fetch_email(email_id, creds):
         print(f"An error occurred parsing email: {e}")
         return
 
+    process_email(subject, body)
+
 
 def poll_for_new_emails(creds):
     service = build("gmail", "v1", credentials=creds)
