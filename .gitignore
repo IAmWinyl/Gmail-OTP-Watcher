@@ -4,3 +4,6 @@ token.json
 
 # Log files
 *.log
+
+# Lock file
+*.lock
