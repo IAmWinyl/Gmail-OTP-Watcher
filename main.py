@@ -253,15 +253,6 @@ def fetch_email(email_id, creds):
     except Exception as e:
         print(f"An error occurred parsing email: {e}")
         return
-    # copied = process_email(subject, body)
-    # if copied:
-    #     # Move to Trash (recoverable for 30 days). Requires the gmail.modify
-    #     # scope; failures here are logged but don't affect the copied code.
-    #     try:
-    #         service.users().messages().trash(userId="me", id=email_id).execute()
-    #         print(f"Trashed {email_id}")
-    #     except Exception as e:
-    #         print(f"Could not trash {email_id}: {e}")
 
 
 def poll_for_new_emails(creds):
