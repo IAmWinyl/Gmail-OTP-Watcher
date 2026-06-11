@@ -21,12 +21,6 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# History/labels we never want to act on (your own outgoing/test mail).
-# Only act on mail that actually landed in the inbox. This correctly handles
-# self-sent test emails (which carry SENT *and* INBOX) and ignores the
-# draft/trash intermediates Gmail creates while composing/forwarding.
-REQUIRE_LABEL = "INBOX"
-
 # Only copy/beep when you've used the keyboard/mouse within this many seconds.
 # When you've been away longer (e.g. doing the verification on your phone), new
 # codes are silently skipped. Raise this if it ever skips a code you wanted.
@@ -288,7 +282,7 @@ def poll_for_new_emails(creds):
                     seen.add(mid)
                     labels = set(msg.get("labelIds", []))
                     print(f"detected {mid} labels={sorted(labels)}")
-                    if REQUIRE_LABEL not in labels:
+                    if "INBOX" not in labels:
                         continue  # not in inbox (draft/trash/etc.)
                     idle = idle_seconds()
                     if idle > IDLE_LIMIT_SECONDS:
