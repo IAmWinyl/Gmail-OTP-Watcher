@@ -113,7 +113,13 @@ launchctl list | grep gmailotpwatcher                                       # ch
 launchctl unload ~/Library/LaunchAgents/com.your_name.gmailotpwatcher.plist # stop + disable
 ```
 
+## Future goals
+
+- **Extract codes embedded in images.** Some senders render the OTP as a PNG instead of text. 
+  Recovering them would need OCR on inline/attached images — out of scope for now.
+
 ## Credit
 
-This is mostly vibe-coded with Claude Code Opus 4.8
+This is mostly vibe-coded with Claude Code Opus 4.8.
+
 Got the idea from https://github.com/mhaowork/verigood but didn't want the AI part.
