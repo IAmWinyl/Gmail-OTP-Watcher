@@ -4,6 +4,7 @@ token.json
 
 # Log files
 *.log
+*.log.*
 
 # Lock file
 *.lock
@@ -12,3 +13,6 @@ token.json
 *.pyc
 *.pyo
 *.pyd
+
+# macOS
+.DS_Store
