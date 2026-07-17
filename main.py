@@ -405,7 +405,7 @@ def main():
     creds_path = os.path.join(here, "credentials.json")
 
     if os.path.exists(token_path):
-        # Delete token.json if you change SCOPES
+        # NOTE: You should manually delete token.json and regenerate it if you change SCOPES
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
