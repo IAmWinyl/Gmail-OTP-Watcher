@@ -3,7 +3,6 @@ import os.path
 import sys
 import time
 import re
-import unicodedata
 import html as html_lib
 import datetime
 import ctypes
@@ -20,6 +19,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+# History/labels we never want to act on (your own outgoing/test mail).
+# Only act on mail that actually landed in the inbox. This correctly handles
+# self-sent test emails (which carry SENT *and* INBOX) and ignores the
+# draft/trash intermediates Gmail creates while composing/forwarding.
+REQUIRE_LABEL = "INBOX"
 
 # Only copy/beep when you've used the keyboard/mouse within this many seconds.
 # When you've been away longer (e.g. doing the verification on your phone), new
@@ -39,10 +44,10 @@ def idle_seconds():
         if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
             return 0.0
         tick = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
-        # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount wraparound
+        # 32-bit unsigned subtraction handles the ~49.7-day GetTickCount
+        # wraparound, which matters since this machine stays on continuously.
         millis = (tick - info.dwTime) & 0xFFFFFFFF
         return millis / 1000.0
-
     if system == "Darwin":
         # HIDIdleTime = nanoseconds since the last HID (keyboard/mouse) event.
         try:
@@ -68,29 +73,6 @@ def decode_hdr(value):
         return value
 
 
-def to_readable_text(s):
-    """Reduce a string to the plain text a human would read, so rendering
-    artifacts (URLs, CRLF/tab padding, &nbsp;, full-width digits, ...) can't
-    inflate the keyword-to-code distance the matcher scores on."""
-    if not s:
-        return ""
-
-    # Drop URLs
-    s = re.sub(r"https?://\S+", " ", s)
-
-    # Normalize to NFKC
-    s = unicodedata.normalize("NFKC", s)
-
-    # Drop zero-width and other format/control chars
-    s = "".join(
-        ch for ch in s
-        if ch in "\t\n\r" or not unicodedata.category(ch).startswith("C")
-    )
-
-    # Collapse whitespace
-    return re.sub(r"\s+", " ", s).strip()
-
-
 def extract_code(subject, body):
     """Pull a verification code or magic link out of an email using regex.
 
@@ -101,7 +83,17 @@ def extract_code(subject, body):
     """
     text = (subject or "") + "\n" + (body or "")
 
-    # Require a verification signal near the numbers
+    # Collapse whitespace runs. HTML tag-stripping leaves table/layout markup as
+    # long stretches of newlines and &nbsp;, which can push a code 40+ chars from
+    # its keyword even when they're visually adjacent ("verification code:" then
+    # the digits in the next table cell). Distance should reflect real text
+    # proximity, not markup. \s also covers the \xa0 from &nbsp;.
+    text = re.sub(r"\s+", " ", text)
+
+    # Require a *strong* verification signal near the number. Bare words like
+    # "code"/"pin" are NOT enough on their own (they match "Internal Revenue
+    # Code", "promo code", "zip code", etc.). They only count in verification
+    # phrasings: "verification code", "your code", "code:", "code is", "PIN is".
     KW = re.compile(
         r"verification|verify|passcode|one[\s-]?time|\botp\b|authenticat|2fa"
         r"|(?:your|this|the|enter|following|security|login|access|confirmation|sign[\s-]?in)\s+(?:code|pin)"
@@ -109,17 +101,18 @@ def extract_code(subject, body):
         r"|(?:code|pin)\s+(?:is|are|was|below)\b",
         re.IGNORECASE,
     )
-    WINDOW = 50  # chars between keyword and code
+    WINDOW = 50  # chars between keyword and code; real phrasing can be long
 
-    # Canonicalize so distance reflects words, not markup
-    clean_text = to_readable_text(text)
+    # Strip URLs before the digit search: tracking links are full of arbitrary
+    # numbers (e.g. ?at=1000lwu3) sitting next to words like 'verify' that would
+    # otherwise beat the real code. Links are still handled by the fallback below.
+    text_no_urls = re.sub(r"https?://\S+", " ", text)
 
     best = None
-    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", clean_text):
+    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", text_no_urls):
         s, e = m.start(), m.end()
-        before = clean_text[max(0, s - WINDOW):s]
-        after = clean_text[e:e + WINDOW]
-        # Distance to the nearest keyword on either side
+        before = text_no_urls[max(0, s - WINDOW):s]
+        after = text_no_urls[e:e + WINDOW]
         dist = None
         for km in KW.finditer(before):
             d = len(before) - km.end()
@@ -129,17 +122,17 @@ def extract_code(subject, body):
             dist = d if dist is None else min(dist, d)
         if dist is None:
             continue
-
-        # Closest keyword wins; tie-break toward 6-digit codes, then position
         digits = m.group(1)
+        # Closest keyword wins; tie-break toward 6-digit codes, then position.
         score = (dist, 0 if len(digits) == 6 else 1, s)
         if best is None or score < best[0]:
             best = (score, digits)
     if best:
         return best[1]
 
-    # Magic-link fallback: a genuine sign-in link, not an unsubscribe/preferences
-    # URL (those contain "login"/"email" and caused false positives)
+    # Magic-link fallback: only when the email actually looks verification-y,
+    # and only for a genuine sign-in link -- not an unsubscribe/preferences URL
+    # (those often contain "login"/"email" and were causing false positives).
     if KW.search(text):
         for lm in re.finditer(r"https?://\S+", text):
             u = lm.group()
@@ -161,22 +154,19 @@ def beep():
     have_file = os.path.exists(SOUND_FILE)
     try:
         if system == "Windows":
-            import winsound
+            import winsound  # stdlib, Windows only
             if have_file:
                 winsound.PlaySound(SOUND_FILE,
                                    winsound.SND_FILENAME | winsound.SND_ASYNC)
             else:
                 winsound.MessageBeep()
-        elif system == "Darwin": # MacOS
-            sound = SOUND_FILE if have_file else "/System/Library/Sounds/Glass.aiff"
-            subprocess.run(["afplay", sound])
+        elif system == "Darwin":
+            os.system(f'afplay "{SOUND_FILE}"' if have_file
+                      else "afplay /System/Library/Sounds/Glass.aiff")
         else:  # Linux/other
-            if have_file:
-                # Try ALSA, fall back to PulseAudio
-                if subprocess.run(["aplay", "-q", SOUND_FILE],
-                                  stderr=subprocess.DEVNULL).returncode != 0:
-                    subprocess.run(["paplay", SOUND_FILE], stderr=subprocess.DEVNULL)
-            else:
+            if have_file and os.system(f'aplay -q "{SOUND_FILE}" 2>/dev/null') != 0:
+                os.system(f'paplay "{SOUND_FILE}" 2>/dev/null')
+            elif not have_file:
                 print("\a", end="", flush=True)  # terminal bell
     except Exception as e:
         print(f"(beep failed: {e})")
@@ -197,8 +187,10 @@ def process_email(subject, body):
 def get_body(mime_msg):
     """Return the best-effort plain-text body of an email.
 
-    Prefers text/plain. Falls back to text/html with tags and style/script
-    blocks stripped and HTML entities unescaped, so the regex sees real text.
+    Prefers text/plain, but only if it actually has content -- senders
+    sometimes include an EMPTY text/plain part alongside the real HTML, and
+    naively preferring it yields an empty body. Falls back to text/html with
+    tags and style/script blocks stripped and entities unescaped.
     """
     plain_parts = []
     html_parts = []
@@ -213,19 +205,23 @@ def get_body(mime_msg):
                 continue
             charset = part.get_content_charset() or "utf-8"
             txt = payload.decode(charset, errors="replace")
+            if not txt.strip():
+                continue  # blank part: ignore so it can't shadow a real one
             (plain_parts if ctype == "text/plain" else html_parts).append(txt)
     else:
         payload = mime_msg.get_payload(decode=True)
         if payload is not None:
             charset = mime_msg.get_content_charset() or "utf-8"
             txt = payload.decode(charset, errors="replace")
-            if mime_msg.get_content_type() == "text/html":
-                html_parts.append(txt)
-            else:
-                plain_parts.append(txt)
+            if txt.strip():
+                if mime_msg.get_content_type() == "text/html":
+                    html_parts.append(txt)
+                else:
+                    plain_parts.append(txt)
 
-    if plain_parts:
-        return "\n".join(plain_parts)
+    plain = "\n".join(plain_parts).strip()
+    if plain:
+        return plain
     if html_parts:
         raw = "\n".join(html_parts)
         raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw,
@@ -248,7 +244,6 @@ def fetch_email(email_id, creds):
     except Exception as e:
         print(f"An error occurred parsing email: {e}")
         return
-
     process_email(subject, body)
 
 
@@ -272,9 +267,10 @@ def poll_for_new_emails(creds):
                 page_token = resp.get("nextPageToken")
                 if not page_token:
                     break
+            # resp is the last page; its historyId is the newest checkpoint.
             start_history_id = resp["historyId"]
 
-            seen = set()
+            seen = set()  # avoid double-processing within one batch
             for change in changes:
                 for added in change.get("messagesAdded", []):
                     msg = added["message"]
@@ -284,11 +280,12 @@ def poll_for_new_emails(creds):
                     seen.add(mid)
                     labels = set(msg.get("labelIds", []))
                     print(f"detected {mid} labels={sorted(labels)}")
-                    if "INBOX" not in labels:
+                    if REQUIRE_LABEL not in labels:
                         continue  # not in inbox (draft/trash/etc.)
                     idle = idle_seconds()
                     if idle > IDLE_LIMIT_SECONDS:
-                        # Skip silently; history still advances so it won't replay
+                        # Away from the computer: skip silently. History still
+                        # advances below, so we won't replay this on return.
                         print(f"skipping {mid} (idle {int(idle)}s)")
                         continue
                     fetch_email(mid, creds)
@@ -335,7 +332,9 @@ class _StreamToLogger:
 
 def setup_logging():
     """When launched in the background, route output to a size-capped rotating
-    logfile next to the script so it can never fill the disk."""
+    logfile next to the script so it can never fill the disk (~4 MB max total).
+    The launcher passes --background; we also fall back to detecting a missing
+    console. Manual console runs are left untouched so you see live output."""
     force = "--background" in sys.argv
     try:
         interactive = sys.stdout is not None and sys.stdout.isatty()
@@ -380,8 +379,9 @@ def ensure_single_instance():
             print("Another instance is already running; exiting.")
             sys.exit(0)
     else:
-        # POSIX: non-blocking flock, auto-released by the OS on exit (no stale
-        # lock). Keep the file object alive in a global.
+        # POSIX (macOS/Linux): hold an exclusive, non-blocking flock on a lock
+        # file. The OS releases it automatically when the process dies, so there
+        # is no stale lock to clean up. Keep the file object alive in a global.
         import fcntl
         here = os.path.dirname(os.path.abspath(__file__))
         _lock_file = open(os.path.join(here, "otp_watcher.lock"), "w")
@@ -397,15 +397,13 @@ def main():
     ensure_single_instance()
     creds = None
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-
-    # Resolve paths next to the script so it works when launched from
-    # Task Scheduler/launchd (CWD = System32 etc.)
+    # Resolve these next to the script, not the current working directory, so
+    # it works when launched from Startup/Task Scheduler (CWD = System32 etc.).
     here = os.path.dirname(os.path.abspath(__file__))
     token_path = os.path.join(here, "token.json")
     creds_path = os.path.join(here, "credentials.json")
-
     if os.path.exists(token_path):
-        # NOTE: You should manually delete token.json and regenerate it if you change SCOPES
+        # If modifying these scopes, delete the file token.json.
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -418,10 +416,7 @@ def main():
             token.write(creds.to_json())
 
     print("Started Gmail agent, monitoring")
-    try:
-        poll_for_new_emails(creds)
-    except KeyboardInterrupt:
-        print("\nStopped.")
+    poll_for_new_emails(creds)
 
 
 if __name__ == "__main__":
