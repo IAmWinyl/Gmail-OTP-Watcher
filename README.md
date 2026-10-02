@@ -17,6 +17,19 @@ Tested on MacOS Tahoe and Windows 11.
   (e.g. doing the verification on your phone), new codes are skipped silently
   so your computer doesn't make noise in another room. Tunable via
   `IDLE_LIMIT_SECONDS`.
+- **Tray icon** — run with `--tray` and it lives in the notification area
+  (Windows: the hidden-icons flyout; drag it onto the taskbar to keep it
+  visible). The envelope's status dot is green while watching, amber while
+  starting and red with a `!` if the watcher died — and no icon at all means
+  it isn't running. Right-click for the status, **Open log**, **Restart
+  watcher** and **Quit**.
+- **Loud, specific failures** — when the watcher dies it does *not* restart
+  itself, because a crash almost always needs you. Instead it raises a native
+  Windows dialog (macOS: an alert) naming the actual reason, with the full
+  traceback behind a **Show technical details** expander. The reason also
+  sticks around afterwards: it's in the icon's tooltip, in the menu's status
+  line, and **Why it stopped...** reopens the dialog. Restart it by hand with
+  **Restart watcher** once you've dealt with the cause.
 - **Self-capping logs** — output goes to a rotating `otp_watcher.log`
   (1 MB × 4 files max, ~4 MB hard ceiling) so it can never fill the disk, even
   in a failure loop.
@@ -24,8 +37,8 @@ Tested on MacOS Tahoe and Windows 11.
 ## Requirements
 
 - Python 3.x
-- Packages: `pyperclip`, `google-api-python-client`, `google-auth`,
-  `google-auth-oauthlib`
+- Packages: `pyperclip`, `pystray`, `Pillow`, `google-api-python-client`,
+  `google-auth`, `google-auth-oauthlib`
 
 ```console
 python -m venv .venv
@@ -72,10 +85,12 @@ Use **Create Task**:
 - **Actions:** Start a program
   - Program/script: `pythonw.exe` (the windowless interpreter, beside your
     `python.exe`)
-  - Add arguments: `"C:\path\to\main.py" --background`
+  - Add arguments: `"C:\path\to\main.py" --tray --background`
   - Start in: `C:\path\to\project`
 - **Conditions:** uncheck "Start only on AC power" if on a laptop.
-- **Settings:** restart on failure (every 1 min); **uncheck** "Stop the task if
+- **Settings:** leave "restart on failure" **off** — in tray mode a crash keeps
+  the process alive holding the red icon, which is what makes it visible;
+  **uncheck** "Stop the task if
   it runs longer than 3 days"; "If already running → Do not start a new
   instance."
 
@@ -96,6 +111,7 @@ Create `~/Library/LaunchAgents/com.<you>.gmailotpwatcher.plist` and modify `your
     <array>
         <string>/path/to/.venv/bin/python3</string>
         <string>/path/to/main.py</string>
+        <string>--tray</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/path/to/project</string>

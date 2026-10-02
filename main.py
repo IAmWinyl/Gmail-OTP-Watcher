@@ -3,6 +3,9 @@ import os.path
 import sys
 import time
 import re
+import json
+import traceback
+import unicodedata
 import html as html_lib
 import datetime
 import ctypes
@@ -14,6 +17,7 @@ import platform
 import email
 from email.header import decode_header, make_header
 
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -30,6 +34,16 @@ REQUIRE_LABEL = "INBOX"
 # When you've been away longer (e.g. doing the verification on your phone), new
 # codes are silently skipped. Raise this if it ever skips a code you wanted.
 IDLE_LIMIT_SECONDS = 60
+
+BACKGROUND = "--background" in sys.argv
+# Tray mode puts a status icon in the notification area so a dead
+# watcher is visible at a glance rather than silently absent.
+TRAY = "--tray" in sys.argv
+
+# Exit codes. On macOS, launchd's KeepAlive {SuccessfulExit: false} restarts
+# only on a nonzero exit, so 0 means "stopped on purpose, needs a human".
+EXIT_NEEDS_HUMAN = 0
+EXIT_CRASH = 1
 
 
 def idle_seconds():
@@ -63,6 +77,122 @@ def idle_seconds():
     return 0.0
 
 
+class _TASKDIALOGCONFIG(ctypes.Structure):
+    """TASKDIALOGCONFIG from commctrl.h (byte-packed via pshpack1.h)."""
+    _pack_ = 1
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("hwndParent", ctypes.c_void_p),
+        ("hInstance", ctypes.c_void_p),
+        ("dwFlags", ctypes.c_uint),
+        ("dwCommonButtons", ctypes.c_uint),
+        ("pszWindowTitle", ctypes.c_wchar_p),
+        ("pszMainIcon", ctypes.c_void_p),
+        ("pszMainInstruction", ctypes.c_wchar_p),
+        ("pszContent", ctypes.c_wchar_p),
+        ("cButtons", ctypes.c_uint),
+        ("pButtons", ctypes.c_void_p),
+        ("nDefaultButton", ctypes.c_int),
+        ("cRadioButtons", ctypes.c_uint),
+        ("pRadioButtons", ctypes.c_void_p),
+        ("nDefaultRadioButton", ctypes.c_int),
+        ("pszVerificationText", ctypes.c_wchar_p),
+        ("pszExpandedInformation", ctypes.c_wchar_p),
+        ("pszExpandedControlText", ctypes.c_wchar_p),
+        ("pszCollapsedControlText", ctypes.c_wchar_p),
+        ("pszFooterIcon", ctypes.c_void_p),
+        ("pszFooter", ctypes.c_wchar_p),
+        ("pfCallback", ctypes.c_void_p),
+        ("lpCallbackData", ctypes.c_ssize_t),
+        ("cxWidth", ctypes.c_uint),
+    ]
+
+
+_TD_CALLBACK = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
+    ctypes.c_size_t, ctypes.c_ssize_t, ctypes.c_ssize_t)
+
+
+def _td_on_created(hwnd, msg, wparam, lparam, refdata):
+    """TDN_CREATED: force the dialog topmost so it can't open behind windows."""
+    if msg == 0:
+        HWND_TOPMOST, SWP_NOSIZE_NOMOVE = -1, 0x0003
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE)
+    return 0
+
+
+_td_callback = _TD_CALLBACK(_td_on_created)
+
+
+def _task_dialog(heading, message, details):
+    """Windows task dialog: big heading, explanation, collapsible details.
+    Returns False if unavailable so the caller can fall back."""
+    TDF_ALLOW_DIALOG_CANCELLATION = 0x0008
+    TDF_EXPAND_FOOTER_AREA = 0x0040
+    TDF_SIZE_TO_CONTENT = 0x01000000
+    TDCBF_OK_BUTTON = 0x0001
+    TD_ERROR_ICON = 65534  # MAKEINTRESOURCE(-2)
+
+    cfg = _TASKDIALOGCONFIG()
+    cfg.cbSize = ctypes.sizeof(cfg)
+    cfg.dwFlags = (TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT
+                   | (TDF_EXPAND_FOOTER_AREA if details else 0))
+    cfg.dwCommonButtons = TDCBF_OK_BUTTON
+    cfg.pszWindowTitle = "OTP Watcher"
+    cfg.pszMainIcon = TD_ERROR_ICON
+    cfg.pszMainInstruction = heading
+    cfg.pszContent = message
+    if details:
+        cfg.pszExpandedInformation = details
+        cfg.pszCollapsedControlText = "Show technical details"
+        cfg.pszExpandedControlText = "Hide technical details"
+    cfg.pfCallback = ctypes.cast(_td_callback, ctypes.c_void_p)
+
+    pressed = ctypes.c_int()
+    hr = ctypes.windll.comctl32.TaskDialogIndirect(
+        ctypes.byref(cfg), ctypes.byref(pressed), None, None)
+    return hr == 0
+
+
+def notify(title, message, details=""):
+    """Visible alert for fatal problems, so a dead watcher is never silent.
+    Blocking dialog rather than a toast: toasts get swallowed by Focus/DND."""
+    print(f"[NOTIFY] {title}: {message}")
+    if details:
+        print(f"[NOTIFY] details:\n{details}")
+    try:
+        system = platform.system()
+        if system == "Windows":
+            if _task_dialog(title, message, details):
+                return
+            # Pre-Vista comctl32 or a malformed dialog: plain message box.
+            body = message + (f"\n\n{details}" if details else "")
+            MB_ICONWARNING, MB_SYSTEMMODAL = 0x30, 0x1000
+            ctypes.windll.user32.MessageBoxW(
+                None, body, title, MB_ICONWARNING | MB_SYSTEMMODAL)
+        elif system == "Darwin":
+            body = message + (f"\n\n{details}" if details else "")
+            subprocess.run(
+                ["osascript", "-e",
+                 f"display alert {json.dumps(title)} message {json.dumps(body)}"],
+                timeout=3600)
+    except Exception as e:
+        print(f"(notify failed: {e})")
+
+
+def describe_failure(exc):
+    """Turn an exception into (one-line reason, full detail text) for display."""
+    reason = f"{type(exc).__name__}: {exc}".strip()
+    reason = re.sub(r"\s+", " ", reason)
+    if len(reason) > 300:
+        reason = reason[:297] + "..."
+    details = traceback.format_exc()
+    if len(details) > 4000:  # keep the dialog a sane size; log has the rest
+        details = "...\n" + details[-4000:]
+    return reason, details
+
+
 def decode_hdr(value):
     """Decode an RFC2047-encoded header (e.g. =?UTF-8?B?...?=) to plain text."""
     if not value:
@@ -71,6 +201,74 @@ def decode_hdr(value):
         return str(make_header(decode_header(value)))
     except Exception:
         return value
+
+
+def to_readable_text(s, keep_urls=False):
+    """Reduce a string to the plain text a human would read, so rendering
+    artifacts (URLs, CRLF/tab padding, &nbsp;, full-width digits, ...) can't
+    inflate the keyword-to-code distance the matcher scores on.
+
+    keep_urls leaves links in place for the magic-link scan, which needs to
+    measure distance to the URL itself."""
+    if not s:
+        return ""
+    # Drop URLs: tracking links are full of arbitrary numbers (e.g. ?at=1000lwu3)
+    # sitting next to words like 'verify' that would otherwise beat the real code.
+    if not keep_urls:
+        s = re.sub(r"https?://\S+", " ", s)
+    # Normalize to NFKC
+    s = unicodedata.normalize("NFKC", s)
+    # Drop zero-width and other format/control chars
+    s = "".join(
+        ch for ch in s
+        if ch in "\t\n\r" or not unicodedata.category(ch).startswith("C")
+    )
+    # Collapse whitespace runs. HTML tag-stripping leaves table/layout markup
+    # as long stretches of newlines and &nbsp;, which can push a code 40+ chars
+    # from its keyword even when they're visually adjacent.
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# A verification signal has to sit near the digits for them to count as a code.
+# Bare words like "code"/"pin" are NOT enough on their own (they match "Internal
+# Revenue Code", "promo code", "zip code"). They only count in verification
+# phrasings: "verification code", "your code", "code:", "code is", "PIN is".
+KW = re.compile(
+    r"verification|verify|passcode|one[\s-]?time|\botp\b|authenticat|2fa"
+    r"|(?:your|this|the|enter|following|security|login|access|confirmation|sign[\s-]?in)\s+(?:code|pin)"
+    r"|(?:code|pin)\s*[:=]"
+    r"|(?:code|pin)\s+(?:is|are|was|below)\b",
+    re.IGNORECASE,
+)
+WINDOW = 50  # chars between keyword and code
+
+_MONTHS = r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+
+# Dates and clock times are full of 4-digit runs, and security emails print
+# them right beside words like "authenticated" ("Authenticated August 24, 2026
+# at 2:02 PM"). Digits inside one of these are never the code.
+DATE_TIME = re.compile(
+    r"\b(?:" + _MONTHS + r")[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*(?:\d{4})?"
+    r"|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:" + _MONTHS + r")[a-z]*\.?\s*,?\s*(?:\d{4})?"
+    r"|\b\d{1,2}[:.]\d{2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?"
+    r"|\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b",
+    re.IGNORECASE,
+)
+
+
+def keyword_distance(text, start, end, window=WINDOW):
+    """Chars from [start:end) to the nearest verification keyword on either
+    side, or None if there isn't one within the window."""
+    before = text[max(0, start - window):start]
+    after = text[end:end + window]
+    dist = None
+    for km in KW.finditer(before):
+        d = len(before) - km.end()
+        dist = d if dist is None else min(dist, d)
+    for km in KW.finditer(after):
+        d = km.start()
+        dist = d if dist is None else min(dist, d)
+    return dist
 
 
 def extract_code(subject, body):
@@ -83,65 +281,67 @@ def extract_code(subject, body):
     """
     text = (subject or "") + "\n" + (body or "")
 
-    # Collapse whitespace runs. HTML tag-stripping leaves table/layout markup as
-    # long stretches of newlines and &nbsp;, which can push a code 40+ chars from
-    # its keyword even when they're visually adjacent ("verification code:" then
-    # the digits in the next table cell). Distance should reflect real text
-    # proximity, not markup. \s also covers the \xa0 from &nbsp;.
-    text = re.sub(r"\s+", " ", text)
+    # Canonicalize so distance reflects words, not markup
+    clean_text = to_readable_text(text)
 
-    # Require a *strong* verification signal near the number. Bare words like
-    # "code"/"pin" are NOT enough on their own (they match "Internal Revenue
-    # Code", "promo code", "zip code", etc.). They only count in verification
-    # phrasings: "verification code", "your code", "code:", "code is", "PIN is".
-    KW = re.compile(
-        r"verification|verify|passcode|one[\s-]?time|\botp\b|authenticat|2fa"
-        r"|(?:your|this|the|enter|following|security|login|access|confirmation|sign[\s-]?in)\s+(?:code|pin)"
-        r"|(?:code|pin)\s*[:=]"
-        r"|(?:code|pin)\s+(?:is|are|was|below)\b",
-        re.IGNORECASE,
-    )
-    WINDOW = 50  # chars between keyword and code; real phrasing can be long
-
-    # Strip URLs before the digit search: tracking links are full of arbitrary
-    # numbers (e.g. ?at=1000lwu3) sitting next to words like 'verify' that would
-    # otherwise beat the real code. Links are still handled by the fallback below.
-    text_no_urls = re.sub(r"https?://\S+", " ", text)
+    # Spans to ignore: digits that are part of a date or a clock time
+    date_spans = [(m.start(), m.end()) for m in DATE_TIME.finditer(clean_text)]
 
     best = None
-    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", text_no_urls):
+    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", clean_text):
         s, e = m.start(), m.end()
-        before = text_no_urls[max(0, s - WINDOW):s]
-        after = text_no_urls[e:e + WINDOW]
-        dist = None
-        for km in KW.finditer(before):
-            d = len(before) - km.end()
-            dist = d if dist is None else min(dist, d)
-        for km in KW.finditer(after):
-            d = km.start()
-            dist = d if dist is None else min(dist, d)
+        if any(ds < e and s < de for ds, de in date_spans):
+            continue  # inside a date/time
+        dist = keyword_distance(clean_text, s, e)
         if dist is None:
             continue
+
+        # Closest keyword wins; tie-break toward 6-digit codes, then position
         digits = m.group(1)
-        # Closest keyword wins; tie-break toward 6-digit codes, then position.
         score = (dist, 0 if len(digits) == 6 else 1, s)
         if best is None or score < best[0]:
             best = (score, digits)
     if best:
         return best[1]
 
-    # Magic-link fallback: only when the email actually looks verification-y,
-    # and only for a genuine sign-in link -- not an unsubscribe/preferences URL
-    # (those often contain "login"/"email" and were causing false positives).
-    if KW.search(text):
-        for lm in re.finditer(r"https?://\S+", text):
-            u = lm.group()
-            if re.search(r"verify|magic|token|otp|confirm|sign[-_]?in", u, re.IGNORECASE) \
-               and not re.search(r"unsubscrib|preferenc|revoke|optout|opt-out|manage|email",
-                                 u, re.IGNORECASE):
-                return u.rstrip(").,>\"']}")
+    # Alphanumeric codes (Steam sends "Login Code 6PVGY"). Runs only after the
+    # digit scan comes up empty, and only for tokens mixing letters AND digits,
+    # so shouty words like STEAM or LOGIN can never qualify.
+    best = None
+    for m in re.finditer(r"(?<![A-Za-z0-9])([A-Z0-9]{4,8})(?![A-Za-z0-9])", clean_text):
+        token = m.group(1)
+        if not (re.search(r"[A-Z]", token) and re.search(r"\d", token)):
+            continue
+        s, e = m.start(), m.end()
+        if any(ds < e and s < de for ds, de in date_spans):
+            continue
+        dist = keyword_distance(clean_text, s, e)
+        if dist is None:
+            continue
+        score = (dist, s)
+        if best is None or score < best[0]:
+            best = (score, token)
+    if best:
+        return best[1]
+
+    # Magic-link fallback: a genuine sign-in link, not an unsubscribe/preferences
+    # URL (those contain "login"/"email" and caused false positives). The keyword
+    # has to be next to the link too: Amazon's "...RefundConfirmation..." order
+    # links sit paragraphs away from an incidental "verification of the item(s)".
+    link_text = to_readable_text(text, keep_urls=True)
+    for lm in re.finditer(r"https?://\S+", link_text):
+        u = lm.group()
+        if not re.search(r"verify|magic|token|otp|confirm|sign[-_]?in", u, re.IGNORECASE):
+            continue
+        if re.search(r"unsubscrib|preferenc|revoke|optout|opt-out|manage|email|disavow|wasnt|not[-_]?you|report",
+                     u, re.IGNORECASE):
+            continue
+        if keyword_distance(link_text, lm.start(), lm.end()) is None:
+            continue
+        return u.rstrip(").,>\"']}")
 
     return None
+
 
 
 # Custom "OTP copied" chime, expected next to this script.
@@ -160,13 +360,16 @@ def beep():
                                    winsound.SND_FILENAME | winsound.SND_ASYNC)
             else:
                 winsound.MessageBeep()
-        elif system == "Darwin":
-            os.system(f'afplay "{SOUND_FILE}"' if have_file
-                      else "afplay /System/Library/Sounds/Glass.aiff")
+        elif system == "Darwin":  # MacOS
+            sound = SOUND_FILE if have_file else "/System/Library/Sounds/Glass.aiff"
+            subprocess.run(["afplay", sound])
         else:  # Linux/other
-            if have_file and os.system(f'aplay -q "{SOUND_FILE}" 2>/dev/null') != 0:
-                os.system(f'paplay "{SOUND_FILE}" 2>/dev/null')
-            elif not have_file:
+            if have_file:
+                # Try ALSA, fall back to PulseAudio
+                if subprocess.run(["aplay", "-q", SOUND_FILE],
+                                  stderr=subprocess.DEVNULL).returncode != 0:
+                    subprocess.run(["paplay", SOUND_FILE], stderr=subprocess.DEVNULL)
+            else:
                 print("\a", end="", flush=True)  # terminal bell
     except Exception as e:
         print(f"(beep failed: {e})")
@@ -247,11 +450,29 @@ def fetch_email(email_id, creds):
     process_email(subject, body)
 
 
+def with_network_retry(fn, what):
+    """Run fn(), retrying transient network failures with capped backoff.
+    Permanent auth failures (RefreshError) propagate immediately."""
+    delay = 5
+    while True:
+        try:
+            return fn()
+        except RefreshError:
+            raise
+        except (TransportError, OSError, HttpError) as e:
+            if isinstance(e, HttpError) and e.resp.status < 500 and e.resp.status != 429:
+                raise  # 4xx other than rate limit: not transient
+            print(f"{what} failed (network?), retrying in {delay}s: {e}")
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
 def poll_for_new_emails(creds):
     service = build("gmail", "v1", credentials=creds)
     user_id = "me"
-    start_history_id = service.users().getProfile(
-        userId=user_id).execute()["historyId"]
+    start_history_id = with_network_retry(
+        lambda: service.users().getProfile(userId=user_id).execute()["historyId"],
+        "Initial profile fetch")
 
     while True:
         try:
@@ -292,11 +513,14 @@ def poll_for_new_emails(creds):
 
             time.sleep(0.8)
 
+        except RefreshError:
+            raise  # permanent auth failure: let main() notify and stop
         except HttpError as error:
             if error.resp.status == 404:
                 # startHistoryId expired/too old: resync to current.
-                start_history_id = service.users().getProfile(
-                    userId=user_id).execute()["historyId"]
+                start_history_id = with_network_retry(
+                    lambda: service.users().getProfile(userId=user_id).execute()["historyId"],
+                    "History resync")
                 print("History expired; resynced.")
             else:
                 print(f"HTTP error, retrying: {error}")
@@ -379,9 +603,8 @@ def ensure_single_instance():
             print("Another instance is already running; exiting.")
             sys.exit(0)
     else:
-        # POSIX (macOS/Linux): hold an exclusive, non-blocking flock on a lock
-        # file. The OS releases it automatically when the process dies, so there
-        # is no stale lock to clean up. Keep the file object alive in a global.
+        # POSIX: non-blocking flock, auto-released by the OS on exit (no stale
+        # lock). Keep the file object alive in a global.
         import fcntl
         here = os.path.dirname(os.path.abspath(__file__))
         _lock_file = open(os.path.join(here, "otp_watcher.lock"), "w")
@@ -392,31 +615,89 @@ def ensure_single_instance():
             sys.exit(0)
 
 
-def main():
-    setup_logging()
-    ensure_single_instance()
+def get_credentials(token_path, creds_path, scopes):
+    """Load/refresh credentials. Waits out transient network failures (e.g.
+    DNS not up yet right after boot) instead of crashing. Permanent failures
+    (invalid_scope / invalid_grant) raise RefreshError."""
     creds = None
+    if os.path.exists(token_path):
+        # NOTE: delete token.json and regenerate it if you change SCOPES
+        creds = Credentials.from_authorized_user_file(token_path, scopes)
+    if creds and creds.valid:
+        return creds
+    if creds and creds.expired and creds.refresh_token:
+        with_network_retry(lambda: creds.refresh(Request()), "Token refresh")
+    else:
+        if BACKGROUND:
+            # Can't open a browser from a background launch: fail loudly
+            # instead of hanging forever on the consent flow.
+            raise RefreshError("No usable token.json.")
+        flow = InstalledAppFlow.from_client_secrets_file(creds_path, scopes)
+        creds = flow.run_local_server(port=54461, open_browser=False)
+    with open(token_path, "w") as token:
+        token.write(creds.to_json())
+    return creds
+
+
+
+def run_watcher(on_state=None):
+    """Run the watcher to completion. Reports lifecycle changes through
+    on_state(state, detail) so a UI can show them. Returns an exit code."""
+    def state(name, detail="", failure=None):
+        if on_state:
+            on_state(name, detail, failure)
+
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-    # Resolve these next to the script, not the current working directory, so
-    # it works when launched from Startup/Task Scheduler (CWD = System32 etc.).
+    # Resolve paths next to the script so it works when launched from
+    # Task Scheduler/launchd (CWD = System32 etc.)
     here = os.path.dirname(os.path.abspath(__file__))
     token_path = os.path.join(here, "token.json")
     creds_path = os.path.join(here, "credentials.json")
-    if os.path.exists(token_path):
-        # If modifying these scopes, delete the file token.json.
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                creds_path, SCOPES)
-            creds = flow.run_local_server(port=54461, open_browser=False)
-        with open(token_path, "w") as token:
-            token.write(creds.to_json())
 
-    print("Started Gmail agent, monitoring")
-    poll_for_new_emails(creds)
+    try:
+        state("starting", "Authorizing with Gmail...")
+        creds = get_credentials(token_path, creds_path, SCOPES)
+        print("Started Gmail agent, monitoring")
+        state("running", "Watching for OTP emails.")
+        poll_for_new_emails(creds)
+        return EXIT_NEEDS_HUMAN
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        state("stopped", "Stopped by hand.")
+        return EXIT_NEEDS_HUMAN
+    except RefreshError as e:
+        print(f"Auth failure: {e}")
+        reason, details = describe_failure(e)
+        failure = ("OTP Watcher stopped: Gmail sign-in expired",
+                   "Gmail authorization failed, so OTP codes are NOT being copied.\n\n"
+                   f"Reason: {reason}\n\n"
+                   "Fix: delete token.json, run main.py once manually to sign in, "
+                   "then start the watcher again.",
+                   details)
+        state("failed", reason, failure)
+        notify(*failure)
+        return EXIT_NEEDS_HUMAN
+    except Exception as e:
+        traceback.print_exc()
+        reason, details = describe_failure(e)
+        failure = ("OTP Watcher crashed",
+                   "The watcher stopped unexpectedly, so OTP codes are NOT being "
+                   f"copied.\n\nReason: {reason}\n\n"
+                   "It will not restart on its own. Use the Restart watcher item in "
+                   "the tray menu once the cause is dealt with.",
+                   details)
+        state("failed", reason, failure)
+        notify(*failure)
+        return EXIT_CRASH
+
+
+def main():
+    setup_logging()
+    ensure_single_instance()
+    if TRAY:
+        import tray
+        sys.exit(tray.run(run_watcher, notify))
+    sys.exit(run_watcher())
 
 
 if __name__ == "__main__":

@@ -3,3 +3,5 @@ google-auth-httplib2
 google-auth-oauthlib
 openai
 pyperclip
+pystray
+Pillow
