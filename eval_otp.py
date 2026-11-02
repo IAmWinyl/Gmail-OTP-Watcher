@@ -54,10 +54,14 @@ def raw_email(svc, mid):
         return f.read()
 
 
-def context(subject, body, found):
-    text = main.to_readable_text((subject or "") + "\n" + (body or ""), keep_urls=True)
-    i = text.find(found)
-    return text[max(0, i - 80):i + len(found) + 40] if i >= 0 else ""
+def context(bodies, found):
+    """The blocks around the first block containing what was extracted."""
+    for body in bodies:
+        blocks = main.to_blocks(body)
+        for i, b in enumerate(blocks):
+            if found in b:
+                return " || ".join(x[:80] for x in blocks[max(0, i - 2):i + 2])
+    return ""
 
 
 def evaluate(days):
@@ -83,8 +87,8 @@ def evaluate(days):
             print(f"  {n}/{len(ids)}")
         msg = email.message_from_bytes(raw_email(svc, mid))
         subject = main.decode_hdr(msg["subject"])
-        body = main.get_body(msg)
-        found = main.extract_code(subject, body)
+        bodies = main.get_bodies(msg)
+        found = main.extract_code(subject, bodies)
         results.append({
             "id": mid,
             "date": msg["date"],
@@ -92,7 +96,7 @@ def evaluate(days):
             "subject": subject,
             "tags": sorted(tagged.get(mid, ())),
             "found": found,
-            "context": context(subject, body, found) if found else "",
+            "context": context(bodies, found) if found else "",
         })
     return results
 

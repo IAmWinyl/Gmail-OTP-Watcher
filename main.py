@@ -203,142 +203,85 @@ def decode_hdr(value):
         return value
 
 
-def to_readable_text(s, keep_urls=False):
-    """Reduce a string to the plain text a human would read, so rendering
-    artifacts (URLs, CRLF/tab padding, &nbsp;, full-width digits, ...) can't
-    inflate the keyword-to-code distance the matcher scores on.
-
-    keep_urls leaves links in place for the magic-link scan, which needs to
-    measure distance to the URL itself."""
-    if not s:
-        return ""
-    # Drop URLs: tracking links are full of arbitrary numbers (e.g. ?at=1000lwu3)
-    # sitting next to words like 'verify' that would otherwise beat the real code.
-    if not keep_urls:
-        s = re.sub(r"https?://\S+", " ", s)
-    # Normalize to NFKC
-    s = unicodedata.normalize("NFKC", s)
-    # Drop zero-width and other format/control chars
-    s = "".join(
-        ch for ch in s
-        if ch in "\t\n\r" or not unicodedata.category(ch).startswith("C")
-    )
-    # Collapse whitespace runs. HTML tag-stripping leaves table/layout markup
-    # as long stretches of newlines and &nbsp;, which can push a code 40+ chars
-    # from its keyword even when they're visually adjacent.
-    return re.sub(r"\s+", " ", s).strip()
+def to_blocks(text):
+    """Split text into its visual blocks (one per non-empty line), with
+    whitespace collapsed and invisible characters (zero-width joiners etc.)
+    dropped so they can't stop a block from reading as a bare code."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = "".join(ch for ch in text
+                   if ch == "\n" or not unicodedata.category(ch).startswith("C"))
+    return [b for b in (re.sub(r"\s+", " ", ln).strip() for ln in text.split("\n")) if b]
 
 
-# A verification signal has to sit near the digits for them to count as a code.
-# Bare words like "code"/"pin" are NOT enough on their own (they match "Internal
-# Revenue Code", "promo code", "zip code"). They only count in verification
-# phrasings: "verification code", "your code", "code:", "code is", "PIN is".
-KW = re.compile(
-    r"verification|verify|passcode|one[\s-]?time|\botp\b|authenticat|2fa"
-    r"|(?:your|this|the|enter|following|security|login|access|confirmation|sign[\s-]?in)\s+(?:code|pin)"
-    r"|(?:code|pin)\s*[:=]"
-    r"|(?:code|pin)\s+(?:is|are|was|below)\b",
-    re.IGNORECASE,
-)
-WINDOW = 50  # chars between keyword and code
-
-_MONTHS = r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
-
-# Dates and clock times are full of 4-digit runs, and security emails print
-# them right beside words like "authenticated" ("Authenticated August 24, 2026
-# at 2:02 PM"). Digits inside one of these are never the code.
-DATE_TIME = re.compile(
-    r"\b(?:" + _MONTHS + r")[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*(?:\d{4})?"
-    r"|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:" + _MONTHS + r")[a-z]*\.?\s*,?\s*(?:\d{4})?"
-    r"|\b\d{1,2}[:.]\d{2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?"
-    r"|\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b",
+# Words that only show up around sign-in codes. Generic labels like "code:",
+# "confirmation code" or "authorization code" are deliberately absent: DMV
+# appointments and card receipts print those right above their own numbers.
+# A bare "log in" is absent too ("Log in to your account" is in every receipt).
+VERIFY_KW = re.compile(
+    r"verif|passcode|one[\s-]?time|\botp\b|authenticat|\b2fa\b"
+    r"|two[\s-]?(?:factor|step)|multi[\s-]?factor"
+    r"|(?:sign[\s-]?in|log[\s-]?in|login)\s+code",
     re.IGNORECASE,
 )
 
+# A whole block that is nothing but a code: 4-8 digits, or 4-8 uppercase
+# letters/digits with at least one of each (Steam's "6PVGY"), so a shouty word
+# like TYPEFIRE never qualifies.
+CODE_BLOCK = re.compile(r"\d{4,8}|(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{4,8}")
 
-def keyword_distance(text, start, end, window=WINDOW):
-    """Chars from [start:end) to the nearest verification keyword on either
-    side, or None if there isn't one within the window."""
-    before = text[max(0, start - window):start]
-    after = text[end:end + window]
-    dist = None
-    for km in KW.finditer(before):
-        d = len(before) - km.end()
-        dist = d if dist is None else min(dist, d)
-    for km in KW.finditer(after):
-        d = km.start()
-        dist = d if dist is None else min(dist, d)
-    return dist
+# How many blocks a code may sit from its verification wording. Real ones are
+# directly above or below it ("Your one-time passcode:" then the code).
+KW_REACH = 2
 
 
-def extract_code(subject, body):
-    """Pull a verification code or magic link out of an email using regex.
+def _keyword_blocks(blocks):
+    return [i for i, b in enumerate(blocks) if VERIFY_KW.search(b)]
 
-    Strategy: find every standalone 4-8 digit run, score each by how close it
-    sits to a verification keyword on EITHER side, and return the closest one.
-    This avoids grabbing reference numbers/dates/amounts, and handles subjects
-    where the number comes before the word 'code'. Falls back to a magic link.
+
+def extract_code(subject, bodies):
+    """Pull a verification code or magic link out of an email.
+
+    Senders put sign-in codes on their own: a line of their own in plain text,
+    a bold paragraph or table cell of their own in HTML. Receipts, coupons and
+    appointment emails put theirs inline ("Auth code: 015016"). So a code has
+    to be a whole block by itself, with verification wording in a nearby block.
+    Each body (plain and HTML) is checked separately, since a sender can put
+    the code alone in one and mid-sentence in the other.
     """
-    text = (subject or "") + "\n" + (body or "")
-
-    # Canonicalize so distance reflects words, not markup
-    clean_text = to_readable_text(text)
-
-    # Spans to ignore: digits that are part of a date or a clock time
-    date_spans = [(m.start(), m.end()) for m in DATE_TIME.finditer(clean_text)]
+    subject_block = [" ".join(to_blocks(subject))] if subject else []
+    sections = [subject_block + to_blocks(body) for body in bodies]
 
     best = None
-    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", clean_text):
-        s, e = m.start(), m.end()
-        if any(ds < e and s < de for ds, de in date_spans):
-            continue  # inside a date/time
-        dist = keyword_distance(clean_text, s, e)
-        if dist is None:
-            continue
-
-        # Closest keyword wins; tie-break toward 6-digit codes, then position
-        digits = m.group(1)
-        score = (dist, 0 if len(digits) == 6 else 1, s)
-        if best is None or score < best[0]:
-            best = (score, digits)
-    if best:
-        return best[1]
-
-    # Alphanumeric codes (Steam sends "Login Code 6PVGY"). Runs only after the
-    # digit scan comes up empty, and only for tokens mixing letters AND digits,
-    # so shouty words like STEAM or LOGIN can never qualify.
-    best = None
-    for m in re.finditer(r"(?<![A-Za-z0-9])([A-Z0-9]{4,8})(?![A-Za-z0-9])", clean_text):
-        token = m.group(1)
-        if not (re.search(r"[A-Z]", token) and re.search(r"\d", token)):
-            continue
-        s, e = m.start(), m.end()
-        if any(ds < e and s < de for ds, de in date_spans):
-            continue
-        dist = keyword_distance(clean_text, s, e)
-        if dist is None:
-            continue
-        score = (dist, s)
-        if best is None or score < best[0]:
-            best = (score, token)
+    for blocks in sections:
+        kw = _keyword_blocks(blocks)
+        for i, block in enumerate(blocks):
+            if not kw or not CODE_BLOCK.fullmatch(block):
+                continue
+            dist = min(abs(i - k) for k in kw)
+            if dist > KW_REACH:
+                continue
+            # Closest wording wins; tie-break toward 6-digit codes, then position
+            score = (dist, 0 if len(block) == 6 else 1, i)
+            if best is None or score < best[0]:
+                best = (score, block)
     if best:
         return best[1]
 
     # Magic-link fallback: a genuine sign-in link, not an unsubscribe/preferences
-    # URL (those contain "login"/"email" and caused false positives). The keyword
-    # has to be next to the link too: Amazon's "...RefundConfirmation..." order
-    # links sit paragraphs away from an incidental "verification of the item(s)".
-    link_text = to_readable_text(text, keep_urls=True)
-    for lm in re.finditer(r"https?://\S+", link_text):
-        u = lm.group()
-        if not re.search(r"verify|magic|token|otp|confirm|sign[-_]?in", u, re.IGNORECASE):
-            continue
-        if re.search(r"unsubscrib|preferenc|revoke|optout|opt-out|manage|email|disavow|wasnt|not[-_]?you|report",
-                     u, re.IGNORECASE):
-            continue
-        if keyword_distance(link_text, lm.start(), lm.end()) is None:
-            continue
-        return u.rstrip(").,>\"']}")
+    # URL (those contain "login"/"email" and caused false positives), with
+    # verification wording nearby so incidental links in long emails don't count.
+    for blocks in sections:
+        kw = _keyword_blocks(blocks)
+        for i, block in enumerate(blocks):
+            for lm in re.finditer(r"https?://\S+", block):
+                u = lm.group()
+                if not re.search(r"verify|magic|token|otp|confirm|sign[-_]?in", u, re.IGNORECASE):
+                    continue
+                if re.search(r"unsubscrib|preferenc|revoke|optout|opt-out|manage|email|disavow|wasnt|not[-_]?you|report",
+                             u, re.IGNORECASE):
+                    continue
+                if kw and min(abs(i - k) for k in kw) <= KW_REACH:
+                    return u.rstrip(").,>\"']}")
 
     return None
 
@@ -389,9 +332,9 @@ def beep():
         print(f"(beep failed: {e})")
 
 
-def process_email(subject, body):
+def process_email(subject, bodies):
     """Copy the code and beep. Returns True if a code was found/copied."""
-    code = extract_code(subject, body)
+    code = extract_code(subject, bodies)
     if not code:
         print("No validation code or link found in the email")
         return False
@@ -401,51 +344,44 @@ def process_email(subject, body):
     return True
 
 
-def get_body(mime_msg):
-    """Return the best-effort plain-text body of an email.
+# Tags that start a new visual block. Everything else (strong, span, a, ...)
+# is inline, so a code wrapped in <strong> still reads as a block of its own.
+_BLOCK_TAGS = (r"p|div|td|th|tr|li|ul|ol|table|tbody|thead|h[1-6]|br|hr"
+               r"|center|blockquote|section|article|header|footer|title")
 
-    Prefers text/plain, but only if it actually has content -- senders
-    sometimes include an EMPTY text/plain part alongside the real HTML, and
-    naively preferring it yields an empty body. Falls back to text/html with
-    tags and style/script blocks stripped and entities unescaped.
+
+def html_to_text(raw):
+    """HTML to plain text with one visual block per line."""
+    raw = re.sub(r"<(script|style|head)\b.*?</\1\s*>", "\n", raw,
+                 flags=re.DOTALL | re.IGNORECASE)
+    raw = re.sub(r"<!--.*?-->", " ", raw, flags=re.DOTALL)
+    raw = re.sub(rf"</?(?:{_BLOCK_TAGS})\b[^>]*>", "\n", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"<[^>]+>", " ", raw)
+    return html_lib.unescape(raw)
+
+
+def get_bodies(mime_msg):
+    """Every non-empty text part of an email as plain text, HTML parts
+    converted with one visual block per line.
+
+    Blank parts are skipped: senders sometimes include an EMPTY text/plain part
+    alongside the real HTML.
     """
-    plain_parts = []
-    html_parts = []
-
-    if mime_msg.is_multipart():
-        for part in mime_msg.walk():
-            ctype = part.get_content_type()
-            if ctype not in ("text/plain", "text/html"):
-                continue
-            payload = part.get_payload(decode=True)  # decode transfer-encoding
-            if payload is None:
-                continue
-            charset = part.get_content_charset() or "utf-8"
-            txt = payload.decode(charset, errors="replace")
-            if not txt.strip():
-                continue  # blank part: ignore so it can't shadow a real one
-            (plain_parts if ctype == "text/plain" else html_parts).append(txt)
-    else:
-        payload = mime_msg.get_payload(decode=True)
-        if payload is not None:
-            charset = mime_msg.get_content_charset() or "utf-8"
-            txt = payload.decode(charset, errors="replace")
-            if txt.strip():
-                if mime_msg.get_content_type() == "text/html":
-                    html_parts.append(txt)
-                else:
-                    plain_parts.append(txt)
-
-    plain = "\n".join(plain_parts).strip()
-    if plain:
-        return plain
-    if html_parts:
-        raw = "\n".join(html_parts)
-        raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw,
-                     flags=re.DOTALL | re.IGNORECASE)
-        raw = re.sub(r"<[^>]+>", " ", raw)
-        return html_lib.unescape(raw)
-    return ""
+    bodies = []
+    for part in mime_msg.walk():
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html"):
+            continue
+        payload = part.get_payload(decode=True)  # decode transfer-encoding
+        if payload is None:
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        txt = payload.decode(charset, errors="replace")
+        if ctype == "text/html":
+            txt = html_to_text(txt)
+        if txt.strip():
+            bodies.append(txt)
+    return bodies
 
 
 def fetch_email(email_id, creds):
@@ -456,12 +392,13 @@ def fetch_email(email_id, creds):
         mime_msg = email.message_from_bytes(base64.urlsafe_b64decode(msg["raw"]))
         subject = decode_hdr(mime_msg["subject"])
         from_name = decode_hdr(mime_msg["from"])
-        body = get_body(mime_msg)
-        print(f"From: {from_name}\nSubject: {subject}\nBody length: {len(body)}")
+        bodies = get_bodies(mime_msg)
+        print(f"From: {from_name}\nSubject: {subject}\n"
+              f"Body lengths: {[len(b) for b in bodies]}")
     except Exception as e:
         print(f"An error occurred parsing email: {e}")
         return
-    process_email(subject, body)
+    process_email(subject, bodies)
 
 
 def with_network_retry(fn, what):
