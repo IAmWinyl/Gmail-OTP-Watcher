@@ -36,9 +36,12 @@ REQUIRE_LABEL = "INBOX"
 IDLE_LIMIT_SECONDS = 60
 
 BACKGROUND = "--background" in sys.argv
+# True when running from the PyInstaller-built .exe rather than source.
+FROZEN = getattr(sys, "frozen", False)
 # Tray mode puts a status icon in the notification area so a dead
-# watcher is visible at a glance rather than silently absent.
-TRAY = "--tray" in sys.argv
+# watcher is visible at a glance rather than silently absent. The packaged
+# app is always a tray app, so there are no flags to remember.
+TRAY = "--tray" in sys.argv or FROZEN
 
 # Exit codes. On macOS, launchd's KeepAlive {SuccessfulExit: false} restarts
 # only on a nonzero exit, so 0 means "stopped on purpose, needs a human".
@@ -341,8 +344,22 @@ def extract_code(subject, body):
 
 
 
-# Custom "OTP copied" chime, expected next to this script.
-SOUND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_chime.wav")
+def app_dir():
+    """Where the user's own files live (token, credentials, log, lock).
+    Beside the .exe when frozen, beside the script otherwise. Never the
+    PyInstaller temp dir, which is wiped on exit."""
+    if FROZEN:
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def bundled_path(name):
+    """A read-only asset shipped inside the build (unpacked to _MEIPASS)."""
+    return os.path.join(getattr(sys, "_MEIPASS", None) or app_dir(), name)
+
+
+# Custom "OTP copied" chime, shipped with the app.
+SOUND_FILE = bundled_path("otp_chime.wav")
 
 
 def beep():
@@ -563,8 +580,7 @@ def setup_logging():
         interactive = False
     if interactive and not force:
         return
-    here = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(here, "otp_watcher.log")
+    log_path = os.path.join(app_dir(), "otp_watcher.log")
 
     logger = logging.getLogger("otp_watcher")
     logger.setLevel(logging.INFO)
@@ -585,6 +601,22 @@ _mutex_handle = None  # Windows: kept alive for the process lifetime
 _lock_file = None     # macOS/POSIX: kept open to hold the flock
 
 
+def _already_running():
+    """Report the duplicate launch and stop. A packaged/tray build has no
+    console, so exiting quietly here looks identical to never starting --
+    the exact invisible failure the tray icon exists to prevent."""
+    print("Another instance is already running; exiting.")
+    if TRAY:
+        notify("OTP Watcher is already running",
+               "Another copy already has the lock, so this one closed and no "
+               "second tray icon appeared." + chr(10) + chr(10) +
+               "If you cannot see an icon in the notification area, the copy "
+               "holding the lock is probably an older background launch -- a "
+               "Task Scheduler task or a Startup shortcut. Stop that one, then "
+               "start this app again.")
+    sys.exit(0)
+
+
 def ensure_single_instance():
     """Exit immediately if another copy of the watcher is already running.
     Prevents duplicate beepers no matter how many times it gets launched."""
@@ -597,19 +629,16 @@ def ensure_single_instance():
         k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
         _mutex_handle = k32.CreateMutexW(None, False, "OTP_Watcher_single_instance_v1")
         if k32.GetLastError() == ERROR_ALREADY_EXISTS:
-            print("Another instance is already running; exiting.")
-            sys.exit(0)
+            _already_running()
     else:
         # POSIX: non-blocking flock, auto-released by the OS on exit (no stale
         # lock). Keep the file object alive in a global.
         import fcntl
-        here = os.path.dirname(os.path.abspath(__file__))
-        _lock_file = open(os.path.join(here, "otp_watcher.lock"), "w")
+        _lock_file = open(os.path.join(app_dir(), "otp_watcher.lock"), "w")
         try:
             fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            print("Another instance is already running; exiting.")
-            sys.exit(0)
+            _already_running()
 
 
 def get_credentials(token_path, creds_path, scopes):
@@ -625,12 +654,22 @@ def get_credentials(token_path, creds_path, scopes):
     if creds and creds.expired and creds.refresh_token:
         with_network_retry(lambda: creds.refresh(Request()), "Token refresh")
     else:
-        if BACKGROUND:
+        if BACKGROUND and not FROZEN:
             # Can't open a browser from a background launch: fail loudly
             # instead of hanging forever on the consent flow.
             raise RefreshError("No usable token.json.")
+        if FROZEN:
+            # The packaged app has no console to print the consent URL to,
+            # so drive the browser directly and say why it just opened --
+            # otherwise first run hangs invisibly on the OAuth prompt.
+            notify("OTP Watcher needs to sign in",
+                   "No saved Gmail authorization was found, so your browser "
+                   "is opening so you can grant access.\n\n"
+                   "This happens once. "
+                   "After you approve, the watcher starts on its own and the "
+                   "tray icon turns green.")
         flow = InstalledAppFlow.from_client_secrets_file(creds_path, scopes)
-        creds = flow.run_local_server(port=54461, open_browser=False)
+        creds = flow.run_local_server(port=54461, open_browser=FROZEN)
     with open(token_path, "w") as token:
         token.write(creds.to_json())
     return creds
@@ -647,7 +686,7 @@ def run_watcher(on_state=None):
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
     # Resolve paths next to the script so it works when launched from
     # Task Scheduler/launchd (CWD = System32 etc.)
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = app_dir()
     token_path = os.path.join(here, "token.json")
     creds_path = os.path.join(here, "credentials.json")
 

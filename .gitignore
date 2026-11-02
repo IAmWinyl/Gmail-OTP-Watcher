@@ -16,3 +16,9 @@ token.json
 
 # macOS
 .DS_Store
+
+# Build artifacts
+build/
+dist/
+*.spec
+otp_watcher.ico

@@ -17,7 +17,8 @@ Tested on MacOS Tahoe and Windows 11.
   (e.g. doing the verification on your phone), new codes are skipped silently
   so your computer doesn't make noise in another room. Tunable via
   `IDLE_LIMIT_SECONDS`.
-- **Tray icon** — run with `--tray` and it lives in the notification area
+- **Tray icon** — the packaged app is always a tray app (from source, pass
+  `--tray`). It lives in the notification area
   (Windows: the hidden-icons flyout; drag it onto the taskbar to keep it
   visible). The envelope's status dot is green while watching, amber while
   starting and red with a `!` if the watcher died — and no icon at all means
@@ -72,9 +73,46 @@ the token headlessly.
 
 > If you change the scope or change the publishing status, delete `token.json` and re-run this step to re-authorize.
 
+## Build the app (Windows)
+
+Produces a single self-contained `OTP Watcher.exe` — no Python install, no
+flags to remember, no console window.
+
+```console
+pip install pyinstaller
+python build.py
+```
+
+The result lands in `dist/`. The build also renders `otp_watcher.ico` from the
+same artwork the tray icon uses, and copies `credentials.json` and
+`token.json` next to the `.exe`.
+
+Secrets are deliberately **not** baked into the binary. The app reads and
+writes them beside the `.exe` (see `app_dir()` in `main.py`), along with
+`otp_watcher.log` and the lock file. So `dist/` must contain:
+
+```
+dist/
+  OTP Watcher.exe
+  credentials.json     <- required
+  token.json           <- optional; without it, first run opens a browser
+```
+
+If `token.json` is missing, the first launch opens your browser for Gmail
+consent and tells you why before it does. After you approve, it writes
+`token.json` itself and starts watching.
+
 ## Run at startup
 
-### Windows (Task Scheduler)
+### Windows (Startup folder) — recommended for the `.exe`
+
+Press <kbd>Win</kbd>+<kbd>R</kbd>, run `shell:startup`, and put a shortcut to
+`dist\OTP Watcher.exe` in the folder that opens. That's it — no arguments,
+and it starts on every login.
+
+To stop it starting, delete the shortcut.
+
+### Windows (Task Scheduler) — for running from source
 
 > NOTE: Run it once manually to authenticate before setting this up.
 

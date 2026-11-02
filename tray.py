@@ -13,7 +13,9 @@ import platform
 import pystray
 from PIL import Image, ImageDraw
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from main import app_dir
+
+HERE = app_dir()
 LOG_PATH = os.path.join(HERE, "otp_watcher.log")
 
 # state -> (dot color, human label)
@@ -25,8 +27,9 @@ STATES = {
 }
 
 
-def _icon_image(color, alert=False):
-    """Envelope glyph with a status dot, drawn large and downscaled for edges."""
+def _icon_image(color, alert=False, out=64):
+    """Envelope glyph with a status dot, drawn large and downscaled for edges.
+    out=256 gives the full-detail render the .ico build needs."""
     size = 256
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -43,7 +46,7 @@ def _icon_image(color, alert=False):
         d.line([(198, 172), (198, 208)], fill="#ffffff", width=12)
         d.ellipse((190, 220, 206, 236), fill="#ffffff")
 
-    return img.resize((64, 64), Image.LANCZOS)
+    return img if out == size else img.resize((out, out), Image.LANCZOS)
 
 
 def _open_log():
