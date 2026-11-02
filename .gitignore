@@ -2,6 +2,9 @@
 credentials.json
 token.json
 
+# Cached real emails from eval_otp.py
+.eval_cache/
+
 # Log files
 *.log
 *.log.*
