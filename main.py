@@ -76,53 +76,50 @@ def idle_seconds():
         return 0.0
     return 0.0
 
+if platform.system() == "Windows":
+    class _TASKDIALOGCONFIG(ctypes.Structure):
+        """TASKDIALOGCONFIG from commctrl.h (byte-packed via pshpack1.h)."""
+        _pack_ = 1
+        _fields_ = [
+            ("cbSize", ctypes.c_uint),
+            ("hwndParent", ctypes.c_void_p),
+            ("hInstance", ctypes.c_void_p),
+            ("dwFlags", ctypes.c_uint),
+            ("dwCommonButtons", ctypes.c_uint),
+            ("pszWindowTitle", ctypes.c_wchar_p),
+            ("pszMainIcon", ctypes.c_void_p),
+            ("pszMainInstruction", ctypes.c_wchar_p),
+            ("pszContent", ctypes.c_wchar_p),
+            ("cButtons", ctypes.c_uint),
+            ("pButtons", ctypes.c_void_p),
+            ("nDefaultButton", ctypes.c_int),
+            ("cRadioButtons", ctypes.c_uint),
+            ("pRadioButtons", ctypes.c_void_p),
+            ("nDefaultRadioButton", ctypes.c_int),
+            ("pszVerificationText", ctypes.c_wchar_p),
+            ("pszExpandedInformation", ctypes.c_wchar_p),
+            ("pszExpandedControlText", ctypes.c_wchar_p),
+            ("pszCollapsedControlText", ctypes.c_wchar_p),
+            ("pszFooterIcon", ctypes.c_void_p),
+            ("pszFooter", ctypes.c_wchar_p),
+            ("pfCallback", ctypes.c_void_p),
+            ("lpCallbackData", ctypes.c_ssize_t),
+            ("cxWidth", ctypes.c_uint),
+        ]
 
-class _TASKDIALOGCONFIG(ctypes.Structure):
-    """TASKDIALOGCONFIG from commctrl.h (byte-packed via pshpack1.h)."""
-    _pack_ = 1
-    _fields_ = [
-        ("cbSize", ctypes.c_uint),
-        ("hwndParent", ctypes.c_void_p),
-        ("hInstance", ctypes.c_void_p),
-        ("dwFlags", ctypes.c_uint),
-        ("dwCommonButtons", ctypes.c_uint),
-        ("pszWindowTitle", ctypes.c_wchar_p),
-        ("pszMainIcon", ctypes.c_void_p),
-        ("pszMainInstruction", ctypes.c_wchar_p),
-        ("pszContent", ctypes.c_wchar_p),
-        ("cButtons", ctypes.c_uint),
-        ("pButtons", ctypes.c_void_p),
-        ("nDefaultButton", ctypes.c_int),
-        ("cRadioButtons", ctypes.c_uint),
-        ("pRadioButtons", ctypes.c_void_p),
-        ("nDefaultRadioButton", ctypes.c_int),
-        ("pszVerificationText", ctypes.c_wchar_p),
-        ("pszExpandedInformation", ctypes.c_wchar_p),
-        ("pszExpandedControlText", ctypes.c_wchar_p),
-        ("pszCollapsedControlText", ctypes.c_wchar_p),
-        ("pszFooterIcon", ctypes.c_void_p),
-        ("pszFooter", ctypes.c_wchar_p),
-        ("pfCallback", ctypes.c_void_p),
-        ("lpCallbackData", ctypes.c_ssize_t),
-        ("cxWidth", ctypes.c_uint),
-    ]
+    _TD_CALLBACK = ctypes.WINFUNCTYPE(
+        ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
+        ctypes.c_size_t, ctypes.c_ssize_t, ctypes.c_ssize_t)
 
+    def _td_on_created(hwnd, msg, wparam, lparam, refdata):
+        """TDN_CREATED: force the dialog topmost so it can't open behind windows."""
+        if msg == 0:
+            HWND_TOPMOST, SWP_NOSIZE_NOMOVE = -1, 0x0003
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE)
+        return 0
 
-_TD_CALLBACK = ctypes.WINFUNCTYPE(
-    ctypes.c_long, ctypes.c_void_p, ctypes.c_uint,
-    ctypes.c_size_t, ctypes.c_ssize_t, ctypes.c_ssize_t)
-
-
-def _td_on_created(hwnd, msg, wparam, lparam, refdata):
-    """TDN_CREATED: force the dialog topmost so it can't open behind windows."""
-    if msg == 0:
-        HWND_TOPMOST, SWP_NOSIZE_NOMOVE = -1, 0x0003
-        ctypes.windll.user32.SetWindowPos(
-            hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE)
-    return 0
-
-
-_td_callback = _TD_CALLBACK(_td_on_created)
+    _td_callback = _TD_CALLBACK(_td_on_created)
 
 
 def _task_dialog(heading, message, details):
