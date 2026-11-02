@@ -77,7 +77,7 @@ def run(run_watcher, show_failure):
     icon = pystray.Icon("otp_watcher", _icon_image(STATES["starting"][0]),
                         "OTP Watcher - Starting...")
 
-    def set_state(name, detail="", failure=None):
+    def apply_state(name, detail, failure):
         state["name"], state["detail"] = name, detail
         if failure or name != "failed":
             state["failure"] = failure  # a clean restart clears the old reason
@@ -87,6 +87,15 @@ def run(run_watcher, show_failure):
         head = "OTP Watcher - " + label
         icon.title = head + (chr(10) + _clip(detail, 120 - len(head)) if detail else "")
         icon.update_menu()
+
+    def set_state(name, detail="", failure=None):
+        if platform.system() == "Darwin":
+            # AppKit kills the process if the menu bar is touched off the main
+            # thread, and the watcher reports from its worker thread.
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(apply_state, name, detail, failure)
+        else:
+            apply_state(name, detail, failure)
 
     def start_worker():
         def body():
