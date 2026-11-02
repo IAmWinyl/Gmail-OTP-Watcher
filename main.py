@@ -234,12 +234,8 @@ CODE_BLOCK = re.compile(r"\d{4,8}|(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{4,8}
 KW_REACH = 2
 
 
-def _keyword_blocks(blocks):
-    return [i for i, b in enumerate(blocks) if VERIFY_KW.search(b)]
-
-
 def extract_code(subject, bodies):
-    """Pull a verification code or magic link out of an email.
+    """Pull a verification code out of an email, or None.
 
     Senders put sign-in codes on their own: a line of their own in plain text,
     a bold paragraph or table cell of their own in HTML. Receipts, coupons and
@@ -249,13 +245,15 @@ def extract_code(subject, bodies):
     the code alone in one and mid-sentence in the other.
     """
     subject_block = [" ".join(to_blocks(subject))] if subject else []
-    sections = [subject_block + to_blocks(body) for body in bodies]
 
     best = None
-    for blocks in sections:
-        kw = _keyword_blocks(blocks)
+    for body in bodies:
+        blocks = subject_block + to_blocks(body)
+        kw = [i for i, b in enumerate(blocks) if VERIFY_KW.search(b)]
+        if not kw:
+            continue
         for i, block in enumerate(blocks):
-            if not kw or not CODE_BLOCK.fullmatch(block):
+            if not CODE_BLOCK.fullmatch(block):
                 continue
             dist = min(abs(i - k) for k in kw)
             if dist > KW_REACH:
@@ -264,26 +262,7 @@ def extract_code(subject, bodies):
             score = (dist, 0 if len(block) == 6 else 1, i)
             if best is None or score < best[0]:
                 best = (score, block)
-    if best:
-        return best[1]
-
-    # Magic-link fallback: a genuine sign-in link, not an unsubscribe/preferences
-    # URL (those contain "login"/"email" and caused false positives), with
-    # verification wording nearby so incidental links in long emails don't count.
-    for blocks in sections:
-        kw = _keyword_blocks(blocks)
-        for i, block in enumerate(blocks):
-            for lm in re.finditer(r"https?://\S+", block):
-                u = lm.group()
-                if not re.search(r"verify|magic|token|otp|confirm|sign[-_]?in", u, re.IGNORECASE):
-                    continue
-                if re.search(r"unsubscrib|preferenc|revoke|optout|opt-out|manage|email|disavow|wasnt|not[-_]?you|report",
-                             u, re.IGNORECASE):
-                    continue
-                if kw and min(abs(i - k) for k in kw) <= KW_REACH:
-                    return u.rstrip(").,>\"']}")
-
-    return None
+    return best[1] if best else None
 
 
 
@@ -336,7 +315,7 @@ def process_email(subject, bodies):
     """Copy the code and beep. Returns True if a code was found/copied."""
     code = extract_code(subject, bodies)
     if not code:
-        print("No validation code or link found in the email")
+        print("No validation code found in the email")
         return False
     pyperclip.copy(code)
     print("Copied to clipboard:", code)
