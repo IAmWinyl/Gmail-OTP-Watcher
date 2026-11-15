@@ -1,176 +1,59 @@
 # Gmail OTP Watcher
 
-A small background service that extracts one-time passcodes from incoming email in Gmail and copies them to your clipboard instantenously — with a chime so you know it's ready to paste.
+A small menu bar / tray app for macOS and Windows that watches your Gmail and,
+when a sign-in code arrives, copies it to your clipboard and plays a chime so
+you can paste it right away. It only does this when you've used your computer
+in the last minute, so it stays quiet when you're away. Code extraction is pure
+regex and runs on your machine, so no email content leaves it.
 
-Code extraction is pure regex. The only network calls are to the Gmail API so no email content leaves your machine.
+## Setup
 
-## Platform
+You need Python 3 and a Google Cloud project of your own (it's free, and it's
+what lets the app read your Gmail).
 
-Tested on MacOS Tahoe and Windows 11.
+### 1. Google API setup
 
-## Features
-
-- **Distinct chime** — a short bell arpeggio (`otp_chime.wav`) plays on copy.
-  Falls back to a system sound if the WAV is missing.
-- **Idle-aware** — only copies and chimes when you've actually used the
-  keyboard/mouse recently (default: within 60s). When you've stepped away
-  (e.g. doing the verification on your phone), new codes are skipped silently
-  so your computer doesn't make noise in another room. Tunable via
-  `IDLE_LIMIT_SECONDS`.
-- **Tray icon** — the packaged app is always a tray app (from source, pass
-  `--tray`). It lives in the notification area
-  (Windows: the hidden-icons flyout; drag it onto the taskbar to keep it
-  visible). The envelope's status dot is green while watching, amber while
-  starting and red with a `!` if the watcher died — and no icon at all means
-  it isn't running. Right-click for the status, **Open log**, **Restart
-  watcher** and **Quit**.
-- **Loud, specific failures** — when the watcher dies it does *not* restart
-  itself, because a crash almost always needs you. Instead it raises a native
-  Windows dialog (macOS: an alert) naming the actual reason, with the full
-  traceback behind a **Show technical details** expander. The reason also
-  sticks around afterwards: it's in the icon's tooltip, in the menu's status
-  line, and **Why it stopped...** reopens the dialog. Restart it by hand with
-  **Restart watcher** once you've dealt with the cause.
-- **Self-capping logs** — output goes to a rotating `otp_watcher.log`
-  (1 MB × 4 files max, ~4 MB hard ceiling) so it can never fill the disk, even
-  in a failure loop.
-
-## Requirements
-
-- Python 3.x
-- Packages: `pyperclip`, `pystray`, `Pillow`, `google-api-python-client`,
-  `google-auth`, `google-auth-oauthlib`
-
-```console
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Google API setup
+Google's [Gmail API Python quickstart](https://developers.google.com/workspace/gmail/api/quickstart/python)
+walks through these steps with screenshots.
 
 1. In the [Google Cloud Console](https://console.cloud.google.com/), create a
-   project and enable the **Gmail API**. You can find the instructions [here](https://developers.google.com/workspace/gmail/api/quickstart/python).
+   project and enable the **Gmail API**.
+2. Set up the OAuth consent screen (_APIs & Services > OAuth consent screen_)
+   with audience **External**, then **Publish** it to Production. Left in
+   Testing, Google expires your sign-in every 7 days. If you created a client
+   before publishing, delete it and make a new one.
+3. Under _APIs & Services > Credentials_, create an **OAuth client ID** of type
+   **Desktop app** and download it. Leave the downloaded
+   `client_secret_<something>.json` in your Downloads folder or put it in this
+   project folder.
 
-2. Publish the app to **Production** (rather than leaving it in Testing), which prevents
-   refresh tokens from expiring every 7 days. The option should be under _APIs & Services > OAuth Consent Screen > Audience_. If you created a client before doing this, you will have to delete and regenerate it.
-
-3. Create an **OAuth client ID** of type _Desktop app_ and download the
-   credentials as `credentials.json` into the project folder.
-
-## First run (Auth)
-
-Run once interactively so the Google sign-in can complete and write
-`token.json` to the project folder:
-
-```console
-python main.py
-```
-
-This opens a browser for consent. After it prints `Started Gmail agent,
-monitoring`, you're authorized; stop it with Ctrl+C. Subsequent runs refresh
-the token headlessly.
-
-> If you change the scope or change the publishing status, delete `token.json` and re-run this step to re-authorize.
-
-## Build the app (Windows)
-
-Produces a single self-contained `OTP Watcher.exe` — no Python install, no
-flags to remember, no console window.
+### 2. Install
 
 ```console
-pip install pyinstaller
-python build.py
+git clone https://github.com/IAmWinyl/Gmail-OTP-Watcher.git
+cd Gmail-OTP-Watcher
+python3 install.py
 ```
 
-The result lands in `dist/`. The build also renders `otp_watcher.ico` from the
-same artwork the tray icon uses, and copies `credentials.json` and
-`token.json` next to the `.exe`.
+(On Windows, `py install.py`.)
 
-Secrets are deliberately **not** baked into the binary. The app reads and
-writes them beside the `.exe` (see `app_dir()` in `main.py`), along with
-`otp_watcher.log` and the lock file. So `dist/` must contain:
+This builds the app, sets it to start at every login, and launches it. On the
+first launch your browser opens so you can let it read your Gmail. Google warns
+that the app isn't verified, since it's your own project: choose **Advanced**,
+then **Go to ... (unsafe)**. After that the icon turns green.
 
-```
-dist/
-  OTP Watcher.exe
-  credentials.json     <- required
-  token.json           <- optional; without it, first run opens a browser
-```
-
-If `token.json` is missing, the first launch opens your browser for Gmail
-consent and tells you why before it does. After you approve, it writes
-`token.json` itself and starts watching.
-
-## Run at startup
-
-### Windows (Startup folder) — recommended for the `.exe`
-
-Press <kbd>Win</kbd>+<kbd>R</kbd>, run `shell:startup`, and put a shortcut to
-`dist\OTP Watcher.exe` in the folder that opens. That's it — no arguments,
-and it starts on every login.
-
-To stop it starting, delete the shortcut.
-
-### Windows (Task Scheduler) — for running from source
-
-> NOTE: Run it once manually to authenticate before setting this up.
-
-Use **Create Task**:
-
-- **General:** "Run only when user is logged on"
-- **Triggers:** At log on. Optionally delay 30s so networking is up.
-- **Actions:** Start a program
-  - Program/script: `pythonw.exe` (the windowless interpreter, beside your
-    `python.exe`)
-  - Add arguments: `"C:\path\to\main.py" --tray --background`
-  - Start in: `C:\path\to\project`
-- **Conditions:** uncheck "Start only on AC power" if on a laptop.
-- **Settings:** leave "restart on failure" **off** — in tray mode a crash keeps
-  the process alive holding the red icon, which is what makes it visible;
-  **uncheck** "Stop the task if
-  it runs longer than 3 days"; "If already running → Do not start a new
-  instance."
-
-### macOS (launchd)
-
-> NOTE: Run it once manually to authenticate before setting this up.
-
-Create `~/Library/LaunchAgents/com.<you>.gmailotpwatcher.plist` and modify `your_name` and the paths:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.your_name.gmailotpwatcher</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/.venv/bin/python3</string>
-        <string>/path/to/main.py</string>
-        <string>--tray</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/path/to/project</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-```
+## Update
 
 ```console
-launchctl load   ~/Library/LaunchAgents/com.your_name.gmailotpwatcher.plist # start + enable at login
-launchctl list | grep gmailotpwatcher                                       # check (PID = running)
-launchctl unload ~/Library/LaunchAgents/com.your_name.gmailotpwatcher.plist # stop + disable
+git pull
+python3 install.py
 ```
 
-## Future goals
+## Uninstall
 
-- **Extract codes embedded in images.** Some senders render the OTP as a PNG instead of text. 
-  Recovering them would need OCR on inline/attached images — out of scope for now.
+```console
+python3 install.py --uninstall
+```
 
 ## Credit
 

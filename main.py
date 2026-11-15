@@ -36,6 +36,10 @@ REQUIRE_LABEL = "INBOX"
 IDLE_LIMIT_SECONDS = 60
 
 BACKGROUND = "--background" in sys.argv
+# Debug logging records each email's sender and subject and the codes copied.
+# Off by default so the log never becomes a record of your mail.
+DEBUG = "--debug" in sys.argv
+log = logging.getLogger("otp_watcher")
 # True when running from the PyInstaller-built .exe rather than source.
 FROZEN = getattr(sys, "frozen", False)
 # Tray mode puts a status icon in the notification area so a dead
@@ -266,10 +270,18 @@ def extract_code(subject, bodies):
 
 
 
+APP_NAME = "OTP Watcher"
+
+
 def app_dir():
     """Where the user's own files live (token, credentials, log, lock).
-    Beside the .exe when frozen, beside the script otherwise. Never the
-    PyInstaller temp dir, which is wiped on exit."""
+    Beside the .exe on Windows, Application Support for the macOS .app (the
+    bundle gets replaced on every install, so nothing can live inside it),
+    beside the script when run from source."""
+    if FROZEN and platform.system() == "Darwin":
+        path = os.path.expanduser(f"~/Library/Application Support/{APP_NAME}")
+        os.makedirs(path, exist_ok=True)
+        return path
     if FROZEN:
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -315,10 +327,11 @@ def process_email(subject, bodies):
     """Copy the code and beep. Returns True if a code was found/copied."""
     code = extract_code(subject, bodies)
     if not code:
-        print("No validation code found in the email")
+        log.debug("No validation code found in the email")
         return False
     pyperclip.copy(code)
-    print("Copied to clipboard:", code)
+    log.info("Copied a code to the clipboard")
+    log.debug(f"Copied {code}")
     beep()
     return True
 
@@ -372,8 +385,8 @@ def fetch_email(email_id, creds):
         subject = decode_hdr(mime_msg["subject"])
         from_name = decode_hdr(mime_msg["from"])
         bodies = get_bodies(mime_msg)
-        print(f"From: {from_name}\nSubject: {subject}\n"
-              f"Body lengths: {[len(b) for b in bodies]}")
+        log.debug(f"From: {from_name} | Subject: {subject} | "
+                  f"Body lengths: {[len(b) for b in bodies]}")
     except Exception as e:
         print(f"An error occurred parsing email: {e}")
         return
@@ -430,14 +443,14 @@ def poll_for_new_emails(creds):
                         continue
                     seen.add(mid)
                     labels = set(msg.get("labelIds", []))
-                    print(f"detected {mid} labels={sorted(labels)}")
+                    log.debug(f"detected {mid} labels={sorted(labels)}")
                     if REQUIRE_LABEL not in labels:
                         continue  # not in inbox (draft/trash/etc.)
                     idle = idle_seconds()
                     if idle > IDLE_LIMIT_SECONDS:
                         # Away from the computer: skip silently. History still
                         # advances below, so we won't replay this on return.
-                        print(f"skipping {mid} (idle {int(idle)}s)")
+                        log.debug(f"skipping {mid} (idle {int(idle)}s)")
                         continue
                     fetch_email(mid, creds)
 
@@ -494,12 +507,14 @@ def setup_logging():
         interactive = sys.stdout is not None and sys.stdout.isatty()
     except Exception:
         interactive = False
+    log.setLevel(logging.DEBUG if DEBUG else logging.INFO)
     if interactive and not force:
+        if not log.handlers:
+            log.addHandler(logging.StreamHandler(sys.stdout))
         return
     log_path = os.path.join(app_dir(), "otp_watcher.log")
 
-    logger = logging.getLogger("otp_watcher")
-    logger.setLevel(logging.INFO)
+    logger = log
     if not logger.handlers:  # avoid duplicate handlers if called twice
         # 1 MB per file, 3 old files kept -> at most ~4 MB on disk, ever.
         handler = RotatingFileHandler(
@@ -600,14 +615,29 @@ def run_watcher(on_state=None):
             on_state(name, detail, failure)
 
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-    # Resolve paths next to the script so it works when launched from
-    # Task Scheduler/launchd (CWD = System32 etc.)
+    # Resolve paths from app_dir(), not the CWD, which is System32 or / when
+    # launched at login.
     here = app_dir()
     token_path = os.path.join(here, "token.json")
     creds_path = os.path.join(here, "credentials.json")
+    if FROZEN:
+        sign_in_again = "then choose Restart watcher in the tray menu to sign in again."
+    else:
+        sign_in_again = "then run main.py once by hand to sign in again."
 
     try:
         state("starting", "Authorizing with Gmail...")
+        if not os.path.exists(token_path) and not os.path.exists(creds_path):
+            failure = ("OTP Watcher can't sign in: credentials.json is missing",
+                       "Gmail access needs the OAuth client file from your own "
+                       "Google Cloud project, and it isn't there.\n\n"
+                       f"Put it at:\n{creds_path}\n\n"
+                       "The README's Google API setup section says how to get it. "
+                       "Then restart the watcher.",
+                       "")
+            state("failed", "credentials.json is missing", failure)
+            notify(*failure)
+            return EXIT_NEEDS_HUMAN
         creds = get_credentials(token_path, creds_path, SCOPES)
         print("Started Gmail agent, monitoring")
         state("running", "Watching for OTP emails.")
@@ -623,8 +653,7 @@ def run_watcher(on_state=None):
         failure = ("OTP Watcher stopped: Gmail sign-in expired",
                    "Gmail authorization failed, so OTP codes are NOT being copied.\n\n"
                    f"Reason: {reason}\n\n"
-                   "Fix: delete token.json, run main.py once manually to sign in, "
-                   "then start the watcher again.",
+                   f"Fix: delete {token_path}, {sign_in_again}",
                    details)
         state("failed", reason, failure)
         notify(*failure)
