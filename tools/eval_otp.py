@@ -1,6 +1,6 @@
 """Run the extractor over recent real mail and report what it pulled out.
 
-Usage: python eval_otp.py [--days 30]
+Usage: python tools/eval_otp.py [--days 30]
 
 Covers trash + archive from the last N days plus everything under the OTP
 labels. Raw emails are cached in .eval_cache/ (your actual mail, gitignored) so
@@ -13,13 +13,15 @@ import email
 import json
 import os
 import shutil
+import sys
 import time
 
 from googleapiclient.discovery import build
 
-import main
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
+sys.path.insert(0, os.path.join(HERE, "src"))
+import main  # noqa: E402
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, ".eval_cache")
 RAW = os.path.join(CACHE, "raw")
 RESULTS = os.path.join(CACHE, "results.json")

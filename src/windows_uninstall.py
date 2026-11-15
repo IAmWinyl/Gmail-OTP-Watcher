@@ -55,17 +55,11 @@ def uninstall():
     unregister()
     shutil.rmtree(app_dir(), ignore_errors=True)  # sign-in, credentials, log
     # A running .exe can't delete itself, so a helper removes it (and the copy
-    # an update left behind) once this process exits. Its folder goes too, but
-    # only if it's a dedicated "OTP Watcher" folder that's now empty: the .exe
-    # may be sitting in something like Downloads.
-    folder = os.path.dirname(exe)
+    # an update left behind) once this process exits.
     q = lambda s: s.replace("'", "''")
-    script = (f"Wait-Process -Id {me} -ErrorAction SilentlyContinue; "
-              f"Remove-Item -LiteralPath '{q(exe)}', '{q(exe[:-4] + '.old.exe')}' "
-              f"-Force -ErrorAction SilentlyContinue")
-    if os.path.basename(folder) == APP_NAME:
-        script += (f"; if (-not (Get-ChildItem -LiteralPath '{q(folder)}' -Force)) "
-                   f"{{ Remove-Item -LiteralPath '{q(folder)}' -Force }}")
-    subprocess.Popen(["powershell", "-NoProfile", "-Command", script],
+    subprocess.Popen(["powershell", "-NoProfile", "-Command",
+                      f"Wait-Process -Id {me} -ErrorAction SilentlyContinue; "
+                      f"Remove-Item -LiteralPath '{q(exe)}', '{q(exe[:-4] + '.old.exe')}' "
+                      f"-Force -ErrorAction SilentlyContinue"],
                      creationflags=_NO_WINDOW)
     return 0

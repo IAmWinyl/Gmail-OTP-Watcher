@@ -84,7 +84,7 @@ def build():
     run(VENV_PY, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
         "-r", os.path.join(HERE, "requirements.txt"), "pyinstaller")
     print("Building the app (this takes a minute)...")
-    run(VENV_PY, os.path.join(HERE, "build.py"))
+    run(VENV_PY, os.path.join(HERE, "tools", "build.py"))
     return os.path.join(HERE, "dist", NAME + (".app" if MAC else ".exe"))
 
 

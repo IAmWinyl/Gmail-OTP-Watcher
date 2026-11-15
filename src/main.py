@@ -347,12 +347,14 @@ def app_dir():
         path = _user_data_dir()
         os.makedirs(path, exist_ok=True)
         return path
-    return os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # above src/
 
 
 def bundled_path(name):
-    """A read-only asset shipped inside the build (unpacked to _MEIPASS)."""
-    return os.path.join(getattr(sys, "_MEIPASS", None) or app_dir(), name)
+    """A read-only asset shipped inside the build (unpacked to _MEIPASS), or
+    beside this file when run from source."""
+    return os.path.join(getattr(sys, "_MEIPASS", None)
+                        or os.path.dirname(os.path.abspath(__file__)), name)
 
 
 # Custom "OTP copied" chime, shipped with the app.
