@@ -97,6 +97,9 @@ def apply(release):
                 f.write(chunk)
 
     pid = os.getpid()
+    # The new copy outlives this one, so it must not reuse this process's
+    # unpacked PyInstaller files, which get deleted when this one exits.
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
     if MAC:
         app = os.path.abspath(os.path.join(sys.executable, "..", "..", ".."))
         subprocess.run(["ditto", "-x", "-k", download, tmp], check=True)
@@ -109,7 +112,7 @@ def apply(release):
         os.rename(staged, app)
         subprocess.Popen(["/bin/sh", "-c",
                           f'while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; open "$0"', app],
-                         start_new_session=True)
+                         start_new_session=True, env=env)
     else:
         exe = sys.executable
         old = exe[:-4] + ".old.exe"
@@ -121,4 +124,4 @@ def apply(release):
         q = exe.replace("'", "''")
         subprocess.Popen(["powershell", "-NoProfile", "-Command",
                           f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process '{q}'"],
-                         creationflags=NO_WINDOW)
+                         creationflags=NO_WINDOW, env=env)
