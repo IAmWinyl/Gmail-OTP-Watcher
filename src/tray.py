@@ -20,6 +20,11 @@ from system.logs import log
 from system.runtime import app_dir
 
 UPDATE_CHECK_SECONDS = 24 * 3600
+# How often to look at the clock between checks. A plain 24h sleep only counts
+# time the computer is awake, so a laptop that's mostly asleep would go days
+# between checks; waking up briefly and comparing wall-clock time catches up
+# within this long of the computer waking.
+UPDATE_POLL_SECONDS = 15 * 60
 
 HERE = app_dir()
 LOG_PATH = os.path.join(HERE, "otp_watcher.log")
@@ -136,6 +141,7 @@ def run(run_watcher, show_failure):
 
     def check_for_updates():
         while True:
+            last_check = time.time()
             try:
                 release = updater.newer_release()
             except Exception as e:
@@ -145,7 +151,8 @@ def run(run_watcher, show_failure):
                 update["release"] = release
                 on_main(icon.update_menu)
                 offer_update(release)
-            time.sleep(UPDATE_CHECK_SECONDS)
+            while time.time() - last_check < UPDATE_CHECK_SECONDS:
+                time.sleep(UPDATE_POLL_SECONDS)
 
     def update_text(_):
         release = update["release"]
