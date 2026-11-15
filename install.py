@@ -145,8 +145,11 @@ def launch():
 
 def install():
     place_secrets(find_credentials())
-    built = build()
+    # Stop first: a copy running from dist/ (the old .exe setup) would block
+    # the build from replacing it.
+    print("Stopping any running copy...")
     stop()
+    built = build()
     place_app(built)
     launch()
     print(f"\n{NAME} is installed at {APP} and starts at every login.")
