@@ -74,6 +74,5 @@ python3 install.py --uninstall
 
 ## Credit
 
-This is mostly vibe-coded with Claude Code Opus 4.8.
-
+This is vibe-coded with Claude Code.
 Got the idea from https://github.com/mhaowork/verigood but didn't want the AI part.
