@@ -4,21 +4,16 @@ uninstall that entry runs ("OTP Watcher.exe" --uninstall).
 Only per-user registry keys are used (HKCU), so no admin rights are needed.
 """
 import os
+import shutil
 import subprocess
 import sys
 
 import autostart
 import updater
-from main import APP_NAME, ask
+from main import APP_NAME, app_dir, ask
 
 KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\OTPWatcher"
 _NO_WINDOW = 0x08000000
-
-# Everything the app writes beside itself. Only these are deleted, since the
-# .exe may be sitting in a shared folder like Downloads.
-OWN_FILES = ("credentials.json", "token.json", "otp_watcher.lock",
-             os.path.basename(autostart.OFF_MARKER), APP_NAME + ".old.exe",
-             "otp_watcher.log", "otp_watcher.log.1", "otp_watcher.log.2", "otp_watcher.log.3")
 
 
 def register():
@@ -58,21 +53,19 @@ def uninstall():
     if os.path.exists(autostart.ENTRY):
         os.remove(autostart.ENTRY)
     unregister()
+    shutil.rmtree(app_dir(), ignore_errors=True)  # sign-in, credentials, log
+    # A running .exe can't delete itself, so a helper removes it (and the copy
+    # an update left behind) once this process exits. Its folder goes too, but
+    # only if it's a dedicated "OTP Watcher" folder that's now empty: the .exe
+    # may be sitting in something like Downloads.
     folder = os.path.dirname(exe)
-    for name in OWN_FILES:
-        path = os.path.join(folder, name)
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-    # A running .exe can't delete itself, so a helper removes it once this
-    # process exits, and the folder too if nothing else is left in it.
     q = lambda s: s.replace("'", "''")
-    subprocess.Popen(["powershell", "-NoProfile", "-Command",
-                      f"Wait-Process -Id {me} -ErrorAction SilentlyContinue; "
-                      f"Remove-Item -LiteralPath '{q(exe)}' -Force; "
-                      f"if (-not (Get-ChildItem -LiteralPath '{q(folder)}' -Force)) "
-                      f"{{ Remove-Item -LiteralPath '{q(folder)}' -Force }}"],
+    script = (f"Wait-Process -Id {me} -ErrorAction SilentlyContinue; "
+              f"Remove-Item -LiteralPath '{q(exe)}', '{q(exe[:-4] + '.old.exe')}' "
+              f"-Force -ErrorAction SilentlyContinue")
+    if os.path.basename(folder) == APP_NAME:
+        script += (f"; if (-not (Get-ChildItem -LiteralPath '{q(folder)}' -Force)) "
+                   f"{{ Remove-Item -LiteralPath '{q(folder)}' -Force }}")
+    subprocess.Popen(["powershell", "-NoProfile", "-Command", script],
                      creationflags=_NO_WINDOW)
     return 0

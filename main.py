@@ -329,17 +329,24 @@ def extract_code(subject, bodies):
 APP_NAME = "OTP Watcher"
 
 
+def _user_data_dir():
+    """The per-user app data folder: Application Support on macOS,
+    %LOCALAPPDATA% on Windows."""
+    if platform.system() == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, APP_NAME)
+    return os.path.expanduser(f"~/Library/Application Support/{APP_NAME}")
+
+
 def app_dir():
-    """Where the user's own files live (token, credentials, log, lock).
-    Beside the .exe on Windows, Application Support for the macOS .app (the
-    bundle gets replaced on every install, so nothing can live inside it),
-    beside the script when run from source."""
-    if FROZEN and platform.system() == "Darwin":
-        path = os.path.expanduser(f"~/Library/Application Support/{APP_NAME}")
+    """Where the user's own files live (token, credentials, log, lock). The
+    packaged app uses the per-user app data folder, so the app itself can sit
+    anywhere and gets replaced freely on update. Source runs use the project
+    folder."""
+    if FROZEN:
+        path = _user_data_dir()
         os.makedirs(path, exist_ok=True)
         return path
-    if FROZEN:
-        return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -586,12 +593,61 @@ _mutex_handle = None  # Windows: kept alive for the process lifetime
 _lock_file = None     # macOS/POSIX: kept open to hold the flock
 
 
-def _already_running():
-    """Report the duplicate launch and stop. A packaged/tray build has no
-    console, so exiting quietly here looks identical to never starting --
-    the exact invisible failure the tray icon exists to prevent."""
-    print("Another instance is already running; exiting.")
-    if TRAY:
+def _pid_file():
+    """Where the copy holding the lock records its process ID. Always the
+    per-user data folder, so a source run and the app still find each other."""
+    os.makedirs(_user_data_dir(), exist_ok=True)
+    return os.path.join(_user_data_dir(), "running.pid")
+
+
+def _running_copy():
+    """PID of the other running OTP Watcher, if it recorded one and that
+    process really is an OTP Watcher (a stale file could name a reused PID)."""
+    try:
+        with open(_pid_file()) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    if pid == os.getpid():
+        return None
+    if platform.system() == "Windows":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, creationflags=_NO_WINDOW).stdout
+    else:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True).stdout
+    return pid if re.search(r"otp[ _-]?watcher|main\.py", out, re.IGNORECASE) else None
+
+
+def _stop_copy(pid):
+    if platform.system() == "Windows":
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                       capture_output=True, creationflags=_NO_WINDOW)
+    else:
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
+def _already_running(try_lock):
+    """Another copy holds the lock. Offer to close it and take over, and
+    otherwise say so out loud: a tray build has no console, so exiting quietly
+    looks identical to never starting."""
+    print("Another instance is already running.")
+    if not TRAY:
+        sys.exit(0)
+    pid = _running_copy()
+    if pid and ask("OTP Watcher is already running",
+                   "Another copy of OTP Watcher is already running. Close it "
+                   "and use this one instead?", yes="Use this one", no="Cancel"):
+        _stop_copy(pid)
+        for _ in range(50):  # up to ~10s for it to exit and free the lock
+            time.sleep(0.2)
+            if try_lock():
+                return
+    elif not pid:
         notify("OTP Watcher is already running",
                "Another copy already has the lock, so this one closed and no "
                "second tray icon appeared." + chr(10) + chr(10) +
@@ -602,27 +658,43 @@ def _already_running():
 
 
 def ensure_single_instance():
-    """Exit immediately if another copy of the watcher is already running.
-    Prevents duplicate beepers no matter how many times it gets launched."""
+    """Make sure only one copy of the watcher runs, so codes don't get copied
+    and chimed twice, then record this copy's PID for the next one to find."""
     global _mutex_handle, _lock_file
-    system = platform.system()
-    if system == "Windows":
+    if platform.system() == "Windows":
         ERROR_ALREADY_EXISTS = 183
         k32 = ctypes.windll.kernel32
         k32.CreateMutexW.restype = ctypes.c_void_p
         k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-        _mutex_handle = k32.CreateMutexW(None, False, "OTP_Watcher_single_instance_v1")
-        if k32.GetLastError() == ERROR_ALREADY_EXISTS:
-            _already_running()
+
+        def try_lock():
+            global _mutex_handle
+            if _mutex_handle:
+                # Holding a handle keeps the mutex alive, so let go before
+                # checking whether the other copy's is gone.
+                k32.CloseHandle(ctypes.c_void_p(_mutex_handle))
+            _mutex_handle = k32.CreateMutexW(None, False, "OTP_Watcher_single_instance_v1")
+            return k32.GetLastError() != ERROR_ALREADY_EXISTS
     else:
         # POSIX: non-blocking flock, auto-released by the OS on exit (no stale
         # lock). Keep the file object alive in a global.
         import fcntl
         _lock_file = open(os.path.join(app_dir(), "otp_watcher.lock"), "w")
-        try:
-            fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            _already_running()
+
+        def try_lock():
+            try:
+                fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                return False
+
+    if not try_lock():
+        _already_running(try_lock)
+    try:
+        with open(_pid_file(), "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
 
 
 def get_credentials(token_path, creds_path, scopes):

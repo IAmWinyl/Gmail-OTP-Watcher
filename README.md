@@ -33,8 +33,8 @@ walks through these steps with screenshots.
   `OTP-Watcher-macos-x86_64.zip` (Intel). Unzip it, move `OTP Watcher.app` to
   Applications and open it. It isn't signed, so the first time macOS blocks it:
   go to _System Settings > Privacy & Security_ and choose **Open Anyway**.
-- Windows: `OTP-Watcher-windows.exe`. Put it in a folder of its own (it keeps
-  its sign-in next to itself) and run it. If SmartScreen stops it, choose
+- Windows: `OTP-Watcher-windows.exe`. Move it somewhere it can stay (it starts
+  from there at every login) and run it. If SmartScreen stops it, choose
   **More info > Run anyway**.
 
 **Or build it yourself** (needs Python 3). Put the `client_secret_*.json` in
@@ -66,11 +66,10 @@ python3 install.py
 
 ## Uninstall
 
-If you built it yourself:
-
-```console
-python3 install.py --uninstall
-```
+- Windows: _Settings > Apps > Installed apps_, then **Uninstall** on OTP
+  Watcher.
+- macOS: quit it from its menu and drag it to the Trash.
+- If you built it yourself: `python3 install.py --uninstall`
 
 ## Credit
 

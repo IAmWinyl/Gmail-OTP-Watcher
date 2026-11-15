@@ -41,7 +41,7 @@ if MAC:
     DOMAIN = f"gui/{os.getuid()}"
 elif WINDOWS:
     APP = os.path.join(os.environ["LOCALAPPDATA"], "Programs", NAME, NAME + ".exe")
-    DATA = os.path.dirname(APP)  # the .exe keeps its files beside itself
+    DATA = os.path.join(os.environ["LOCALAPPDATA"], NAME)
     SHORTCUT = os.path.join(os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu",
                             "Programs", "Startup", NAME + ".lnk")
 else:
@@ -131,6 +131,7 @@ def place_app(built):
         # ditto keeps the bundle's symlinks and signature intact.
         run("ditto", built, APP)
     else:
+        os.makedirs(os.path.dirname(APP), exist_ok=True)
         shutil.copy2(built, APP)
 
 
@@ -175,7 +176,8 @@ def uninstall():
                              r"Software\Microsoft\Windows\CurrentVersion\Uninstall\OTPWatcher")
         except FileNotFoundError:
             pass
-    shutil.rmtree(DATA, ignore_errors=True)  # on Windows this holds the .exe too
+        shutil.rmtree(os.path.dirname(APP), ignore_errors=True)
+    shutil.rmtree(DATA, ignore_errors=True)
     print(f"{NAME} is uninstalled: stopped, removed from login, and its app, "
           "sign-in and log are deleted.")
 
