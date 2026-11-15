@@ -82,6 +82,10 @@ def main():
         # Keep PyInstaller's generated spec file out of the project root.
         "--specpath", BUILD,
     ]
+    # pystray's Linux backends are never loaded on macOS or Windows, and one of
+    # them trips a SyntaxWarning on Python 3.14+ when PyInstaller compiles it.
+    for module in ("_gtk", "_appindicator", "_xorg", "_util.gtk", "_util.notify_dbus"):
+        cmd += ["--exclude-module", f"pystray.{module}"]
     if MAC:
         # pystray picks its backend at runtime; name it so it gets packed.
         cmd += ["--osx-bundle-identifier", BUNDLE_ID,
