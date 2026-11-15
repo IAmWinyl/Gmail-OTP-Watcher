@@ -20,7 +20,8 @@ from googleapiclient.discovery import build
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
 sys.path.insert(0, os.path.join(HERE, "src"))
-import main  # noqa: E402
+import extract  # noqa: E402
+import watcher  # noqa: E402
 
 CACHE = os.path.join(HERE, ".eval_cache")
 RAW = os.path.join(CACHE, "raw")
@@ -59,7 +60,7 @@ def raw_email(svc, mid):
 def context(bodies, found):
     """The blocks around the first block containing what was extracted."""
     for body in bodies:
-        blocks = main.to_blocks(body)
+        blocks = extract.to_blocks(body)
         for i, b in enumerate(blocks):
             if found in b:
                 return " || ".join(x[:80] for x in blocks[max(0, i - 2):i + 2])
@@ -68,7 +69,7 @@ def context(bodies, found):
 
 def evaluate(days):
     os.makedirs(RAW, exist_ok=True)
-    creds = main.get_credentials(os.path.join(HERE, "token.json"),
+    creds = watcher.get_credentials(os.path.join(HERE, "token.json"),
                                  os.path.join(HERE, "credentials.json"), SCOPES)
     svc = build("gmail", "v1", credentials=creds)
 
@@ -88,13 +89,13 @@ def evaluate(days):
         if n % 50 == 0:
             print(f"  {n}/{len(ids)}")
         msg = email.message_from_bytes(raw_email(svc, mid))
-        subject = main.decode_hdr(msg["subject"])
-        bodies = main.get_bodies(msg)
-        found = main.extract_code(subject, bodies)
+        subject = extract.decode_hdr(msg["subject"])
+        bodies = extract.get_bodies(msg)
+        found = extract.extract_code(subject, bodies)
         results.append({
             "id": mid,
             "date": msg["date"],
-            "from": main.decode_hdr(msg["from"]),
+            "from": extract.decode_hdr(msg["from"]),
             "subject": subject,
             "tags": sorted(tagged.get(mid, ())),
             "found": found,

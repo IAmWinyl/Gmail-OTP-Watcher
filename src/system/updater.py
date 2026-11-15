@@ -14,9 +14,9 @@ import tempfile
 
 import requests
 
-APP_NAME = "OTP Watcher"
+from system.runtime import APP_NAME, NO_WINDOW
+
 MAC = platform.system() == "Darwin"
-_NO_WINDOW = 0x08000000
 
 
 def _git(*args):
@@ -121,4 +121,4 @@ def apply(release):
         q = exe.replace("'", "''")
         subprocess.Popen(["powershell", "-NoProfile", "-Command",
                           f"Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process '{q}'"],
-                         creationflags=_NO_WINDOW)
+                         creationflags=NO_WINDOW)

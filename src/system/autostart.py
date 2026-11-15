@@ -11,11 +11,10 @@ import plistlib
 import subprocess
 import sys
 
-from main import APP_NAME, app_dir
+from system.runtime import APP_NAME, NO_WINDOW, app_dir
 
 LABEL = "com.gmail-otp-watcher"
 MAC = platform.system() == "Darwin"
-_NO_WINDOW = 0x08000000
 
 # Present when you've turned off start-at-login from the tray menu, so a later
 # launch doesn't quietly turn it back on.
@@ -55,7 +54,7 @@ def _write_entry():
               f"$s.TargetPath = '{q(sys.executable)}'; "
               f"$s.WorkingDirectory = '{q(os.path.dirname(sys.executable))}'; $s.Save()")
         subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       check=True, creationflags=_NO_WINDOW)
+                       check=True, creationflags=NO_WINDOW)
 
 
 def sync():

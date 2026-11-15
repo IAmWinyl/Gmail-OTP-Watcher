@@ -14,9 +14,10 @@ import platform
 import pystray
 from PIL import Image, ImageDraw
 
-import autostart
-import updater
-from main import app_dir, ask, log, notify
+from system import autostart, updater
+from system.dialogs import ask, notify
+from system.logs import log
+from system.runtime import app_dir
 
 UPDATE_CHECK_SECONDS = 24 * 3600
 
@@ -211,7 +212,7 @@ def run(run_watcher, show_failure):
     autostart.sync()
     if getattr(sys, "frozen", False) and platform.system() == "Windows":
         try:
-            import windows_uninstall
+            from system import windows_uninstall
             windows_uninstall.register()
         except Exception as e:
             log.info(f"Couldn't add to Installed apps: {e}")

@@ -8,12 +8,11 @@ import shutil
 import subprocess
 import sys
 
-import autostart
-import updater
-from main import APP_NAME, app_dir, ask
+from system.dialogs import ask
+from system.runtime import APP_NAME, NO_WINDOW, app_dir
+from system import autostart, updater
 
 KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\OTPWatcher"
-_NO_WINDOW = 0x08000000
 
 
 def register():
@@ -49,7 +48,7 @@ def uninstall():
         return 1
     exe, me = sys.executable, os.getpid()
     subprocess.run(["taskkill", "/IM", os.path.basename(exe), "/F", "/FI", f"PID ne {me}"],
-                   capture_output=True, creationflags=_NO_WINDOW)
+                   capture_output=True, creationflags=NO_WINDOW)
     if os.path.exists(autostart.ENTRY):
         os.remove(autostart.ENTRY)
     unregister()
@@ -61,5 +60,5 @@ def uninstall():
                       f"Wait-Process -Id {me} -ErrorAction SilentlyContinue; "
                       f"Remove-Item -LiteralPath '{q(exe)}', '{q(exe[:-4] + '.old.exe')}' "
                       f"-Force -ErrorAction SilentlyContinue"],
-                     creationflags=_NO_WINDOW)
+                     creationflags=NO_WINDOW)
     return 0

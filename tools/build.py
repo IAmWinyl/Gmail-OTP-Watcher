@@ -56,7 +56,7 @@ def write_version(release):
     """Bake the version, source repo and build kind into the app, read by
     updater.py. Removed after the build so source runs ask git instead."""
     sys.path.insert(0, SRC)
-    import updater
+    from system import updater
     version, repo = updater.from_git()
     path = os.path.join(SRC, "_version.py")
     with open(path, "w") as f:
@@ -78,7 +78,7 @@ def main():
         "--name", NAME,
         "--icon", icon,
         # The chime is read through bundled_path(), so ship it inside.
-        "--add-data", f"{os.path.join(SRC, 'otp_chime.wav')}{os.pathsep}.",
+        "--add-data", f"{os.path.join(ROOT, 'resources', 'otp_chime.wav')}{os.pathsep}.",
         # Keep PyInstaller's generated spec file out of the project root.
         "--specpath", BUILD,
     ]
