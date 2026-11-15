@@ -35,7 +35,6 @@ REQUIRE_LABEL = "INBOX"
 # codes are silently skipped. Raise this if it ever skips a code you wanted.
 IDLE_LIMIT_SECONDS = 60
 
-BACKGROUND = "--background" in sys.argv
 # Debug logging records each email's sender and subject and the codes copied.
 # Off by default so the log never becomes a record of your mail.
 DEBUG = "--debug" in sys.argv
@@ -47,8 +46,7 @@ FROZEN = getattr(sys, "frozen", False)
 # app is always a tray app, so there are no flags to remember.
 TRAY = "--tray" in sys.argv or FROZEN
 
-# Exit codes. On macOS, launchd's KeepAlive {SuccessfulExit: false} restarts
-# only on a nonzero exit, so 0 means "stopped on purpose, needs a human".
+# Exit codes: 0 when the watcher stopped on purpose or needs you, 1 on a crash.
 EXIT_NEEDS_HUMAN = 0
 EXIT_CRASH = 1
 
@@ -498,17 +496,15 @@ class _StreamToLogger:
 
 
 def setup_logging():
-    """When launched in the background, route output to a size-capped rotating
-    logfile next to the script so it can never fill the disk (~4 MB max total).
-    The launcher passes --background; we also fall back to detecting a missing
-    console. Manual console runs are left untouched so you see live output."""
-    force = "--background" in sys.argv
+    """Without a console (the packaged app, or started at login), route output
+    to a size-capped rotating logfile in app_dir() so it can never fill the
+    disk (~4 MB max total). Console runs log to the console instead."""
     try:
         interactive = sys.stdout is not None and sys.stdout.isatty()
     except Exception:
         interactive = False
     log.setLevel(logging.DEBUG if DEBUG else logging.INFO)
-    if interactive and not force:
+    if interactive:
         if not log.handlers:
             log.addHandler(logging.StreamHandler(sys.stdout))
         return
@@ -541,10 +537,9 @@ def _already_running():
         notify("OTP Watcher is already running",
                "Another copy already has the lock, so this one closed and no "
                "second tray icon appeared." + chr(10) + chr(10) +
-               "If you cannot see an icon in the notification area, the copy "
-               "holding the lock is probably an older background launch -- a "
-               "Task Scheduler task or a Startup shortcut. Stop that one, then "
-               "start this app again.")
+               "If you cannot see its icon, the copy holding the lock was "
+               "probably started some other way, like an old manual setup or "
+               "a terminal. Stop that one, then start this app again.")
     sys.exit(0)
 
 
@@ -585,10 +580,6 @@ def get_credentials(token_path, creds_path, scopes):
     if creds and creds.expired and creds.refresh_token:
         with_network_retry(lambda: creds.refresh(Request()), "Token refresh")
     else:
-        if BACKGROUND and not FROZEN:
-            # Can't open a browser from a background launch: fail loudly
-            # instead of hanging forever on the consent flow.
-            raise RefreshError("No usable token.json.")
         if FROZEN:
             # The packaged app has no console to print the consent URL to,
             # so drive the browser directly and say why it just opened --

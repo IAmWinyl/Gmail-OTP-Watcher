@@ -24,4 +24,3 @@ token.json
 build/
 dist/
 *.spec
-otp_watcher.ico

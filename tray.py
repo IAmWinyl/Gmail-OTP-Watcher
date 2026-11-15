@@ -29,7 +29,7 @@ STATES = {
 
 def _icon_image(color, alert=False, out=64):
     """Envelope glyph with a status dot, drawn large and downscaled for edges.
-    out=256 gives the full-detail render the .ico build needs."""
+    out=256 gives the full-detail render the app icon build needs."""
     size = 256
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
