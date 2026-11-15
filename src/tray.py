@@ -223,7 +223,13 @@ def run(run_watcher, show_failure):
             windows_uninstall.register()
         except Exception as e:
             log.info(f"Couldn't add to Installed apps: {e}")
-    threading.Thread(target=check_for_updates, daemon=True).start()
-    start_worker()
-    icon.run()  # blocks on the main thread until Quit
+    def setup(icon):
+        # Start the watcher only once the icon is showing: on Windows, a state
+        # change that lands while it's still appearing is lost, and the dot
+        # stays amber after the watcher is actually running.
+        icon.visible = True
+        start_worker()
+        threading.Thread(target=check_for_updates, daemon=True).start()
+
+    icon.run(setup)  # blocks on the main thread until Quit
     return result["code"]
