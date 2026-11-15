@@ -2,6 +2,8 @@
 macOS. Python and all packages are inside it.
 
 Run: python build.py   (install.py runs this for you)
+     python build.py --release   (the GitHub release workflow; lets the app
+                                  update itself from later releases)
 
 The result lands in dist/. Secrets are deliberately not baked in: the app reads
 credentials.json and writes token.json / its log from app_dir() in main.py.
@@ -48,8 +50,23 @@ def hide_from_dock(app):
     subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app], check=True)
 
 
+def write_version(release):
+    """Bake the version, source repo and build kind into the app, read by
+    updater.py. Removed after the build so source runs ask git instead."""
+    sys.path.insert(0, HERE)
+    import updater
+    version, repo = updater.from_git()
+    path = os.path.join(HERE, "_version.py")
+    with open(path, "w") as f:
+        f.write(f"VERSION = {version!r}\nREPO = {repo!r}\nRELEASE = {release!r}\n")
+    print(f"Version {version or '(untagged)'} from {repo or '(no GitHub remote)'}")
+    return path
+
+
 def main():
+    release = "--release" in sys.argv
     icon = make_icon()
+    version_file = write_version(release)
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean", "--log-level", "ERROR",
@@ -74,8 +91,11 @@ def main():
     cmd.append("main.py")
 
     print(" ".join(cmd))
-    if subprocess.run(cmd, cwd=HERE).returncode != 0:
-        sys.exit("build failed")
+    try:
+        if subprocess.run(cmd, cwd=HERE).returncode != 0:
+            sys.exit("build failed")
+    finally:
+        os.remove(version_file)
 
     if MAC:
         built = os.path.join(HERE, "dist", NAME + ".app")

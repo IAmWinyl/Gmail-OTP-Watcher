@@ -6,7 +6,7 @@ Rerun it after pulling new code to update.
 
 Usage:
   python3 install.py              install or update
-  python3 install.py --uninstall  stop it and remove it from login
+  python3 install.py --uninstall  stop it and remove it completely
 """
 import argparse
 import glob
@@ -31,7 +31,10 @@ VENV_PY = (os.path.join(VENV, "Scripts", "python.exe") if WINDOWS
            else os.path.join(VENV, "bin", "python3"))
 
 if MAC:
-    APP = os.path.expanduser(f"~/Applications/{NAME}.app")
+    # The main Applications folder is writable for admin accounts; anyone else
+    # gets the one in their home folder.
+    APP = (f"/Applications/{NAME}.app" if os.access("/Applications", os.W_OK)
+           else os.path.expanduser(f"~/Applications/{NAME}.app"))
     DATA = os.path.expanduser(f"~/Library/Application Support/{NAME}")
     AGENTS = os.path.expanduser("~/Library/LaunchAgents")
     AGENT = os.path.join(AGENTS, LABEL + ".plist")
@@ -53,14 +56,14 @@ def run(*cmd, check=True, quiet=False):
 
 
 def find_credentials():
-    """The OAuth client file: already installed, in the project folder, or
-    freshly downloaded (Google names it client_secret_<id>.json)."""
+    """The OAuth client file, if it's already installed or in the project
+    folder (Google names the download client_secret_<id>.json). None means the
+    app asks for it with a file picker on first launch."""
     candidates = [os.path.join(DATA, "credentials.json"),
                   os.path.join(HERE, "credentials.json"),
                   os.path.join(HERE, "dist", "credentials.json")]  # old .exe setup
-    downloads = (glob.glob(os.path.join(HERE, "client_secret_*.json"))
-                 + glob.glob(os.path.expanduser("~/Downloads/client_secret_*.json")))
-    candidates += sorted(downloads, key=os.path.getmtime, reverse=True)
+    candidates += sorted(glob.glob(os.path.join(HERE, "client_secret_*.json")),
+                         key=os.path.getmtime, reverse=True)
     for path in candidates:
         if not os.path.exists(path):
             continue
@@ -70,9 +73,7 @@ def find_credentials():
             sys.exit(f"{path} is not a Desktop app OAuth client. Create one of type "
                      f"'Desktop app' instead, as described in {README_SETUP}.")
         return path
-    sys.exit("Couldn't find your Google OAuth client file (credentials.json, or a "
-             "client_secret_*.json in this folder or Downloads).\n"
-             f"Follow {README_SETUP}, then run this again.")
+    return None
 
 
 def build():
@@ -114,7 +115,7 @@ def place_secrets(creds):
     folder. Done before building, since the old .exe setup kept them in dist/."""
     os.makedirs(DATA, exist_ok=True)
     dest = os.path.join(DATA, "credentials.json")
-    if os.path.abspath(creds) != os.path.abspath(dest):
+    if creds and os.path.abspath(creds) != os.path.abspath(dest):
         shutil.copy2(creds, dest)
     # Reuse a sign-in from running it from source or the old .exe setup, so
     # there's no browser trip.
@@ -133,26 +134,11 @@ def place_app(built):
         shutil.copy2(built, APP)
 
 
-def start_at_login():
+def launch():
+    """Start the app. It registers itself to start at login on launch."""
     if MAC:
-        os.makedirs(AGENTS, exist_ok=True)
-        # No KeepAlive: the tray keeps a failed watcher alive and red on its
-        # own, and Quit from the menu should stay quit until next login.
-        agent = {
-            "Label": LABEL,
-            "ProgramArguments": [os.path.join(APP, "Contents", "MacOS", NAME)],
-            "RunAtLoad": True,
-            "LimitLoadToSessionType": "Aqua",
-        }
-        with open(AGENT, "wb") as f:
-            plistlib.dump(agent, f)
-        run("launchctl", "bootstrap", DOMAIN, AGENT)
+        run("open", APP)
     else:
-        quote = lambda s: s.replace("'", "''")
-        ps = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{quote(SHORTCUT)}'); "
-              f"$s.TargetPath = '{quote(APP)}'; "
-              f"$s.WorkingDirectory = '{quote(DATA)}'; $s.Save()")
-        run("powershell", "-NoProfile", "-Command", ps)
         os.startfile(APP)
 
 
@@ -161,8 +147,11 @@ def install():
     built = build()
     stop()
     place_app(built)
-    start_at_login()
+    launch()
     print(f"\n{NAME} is installed at {APP} and starts at every login.")
+    if not os.path.exists(os.path.join(DATA, "credentials.json")):
+        print("It will ask you to choose the client_secret file you downloaded "
+              "from your Google Cloud project.")
     if not os.path.exists(os.path.join(DATA, "token.json")):
         print("Your browser will open so you can let it read your Gmail. "
               "After that, the tray icon turns green.")
@@ -170,17 +159,25 @@ def install():
 
 
 def uninstall():
+    """Stop it, remove it from login, and delete the app along with its
+    sign-in, credentials and log. The project folder isn't touched."""
     stop()
     if MAC:
         if os.path.exists(AGENT):
             os.remove(AGENT)
         shutil.rmtree(APP, ignore_errors=True)
     else:
-        for path in (SHORTCUT, APP):
-            if os.path.exists(path):
-                os.remove(path)
-    print(f"{NAME} is stopped and won't start at login.\n"
-          f"Your sign-in and log are still in {DATA} (delete it to forget them).")
+        if os.path.exists(SHORTCUT):
+            os.remove(SHORTCUT)
+        import winreg
+        try:  # the Installed apps entry the app adds for itself
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Uninstall\OTPWatcher")
+        except FileNotFoundError:
+            pass
+    shutil.rmtree(DATA, ignore_errors=True)  # on Windows this holds the .exe too
+    print(f"{NAME} is uninstalled: stopped, removed from login, and its app, "
+          "sign-in and log are deleted.")
 
 
 if __name__ == "__main__":

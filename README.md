@@ -8,8 +8,8 @@ regex and runs on your machine, so no email content leaves it.
 
 ## Setup
 
-You need Python 3 and a Google Cloud project of your own (it's free, and it's
-what lets the app read your Gmail).
+You need a Google Cloud project of your own (it's free, and it's what lets the
+app read your Gmail).
 
 ### 1. Google API setup
 
@@ -23,11 +23,22 @@ walks through these steps with screenshots.
    Testing, Google expires your sign-in every 7 days. If you created a client
    before publishing, delete it and make a new one.
 3. Under _APIs & Services > Credentials_, create an **OAuth client ID** of type
-   **Desktop app** and download it. Leave the downloaded
-   `client_secret_<something>.json` in your Downloads folder or put it in this
-   project folder.
+   **Desktop app** and download it (`client_secret_<something>.json`).
 
 ### 2. Install
+
+**Download it** from the [latest release](https://github.com/IAmWinyl/Gmail-OTP-Watcher/releases/latest):
+
+- macOS: `OTP-Watcher-macos-arm64.zip` (Apple Silicon) or
+  `OTP-Watcher-macos-x86_64.zip` (Intel). Unzip it, move `OTP Watcher.app` to
+  Applications and open it. It isn't signed, so the first time macOS blocks it:
+  go to _System Settings > Privacy & Security_ and choose **Open Anyway**.
+- Windows: `OTP-Watcher-windows.exe`. Put it in a folder of its own (it keeps
+  its sign-in next to itself) and run it. If SmartScreen stops it, choose
+  **More info > Run anyway**.
+
+**Or build it yourself** (needs Python 3). Put the `client_secret_*.json` in
+the project folder first and it'll skip asking for it:
 
 ```console
 git clone https://github.com/IAmWinyl/Gmail-OTP-Watcher.git
@@ -37,12 +48,16 @@ python3 install.py
 
 (On Windows, `py install.py`.)
 
-This builds the app, sets it to start at every login, and launches it. On the
-first launch your browser opens so you can let it read your Gmail. Google warns
-that the app isn't verified, since it's your own project: choose **Advanced**,
-then **Go to ... (unsafe)**. After that the icon turns green.
+On first launch it asks you to choose the `client_secret_*.json` you
+downloaded, then your browser opens so you can let it read your Gmail. Google
+warns that the app isn't verified, since it's your own project: choose
+**Advanced**, then **Go to ... (unsafe)**. After that the icon turns green, and
+it starts at every login.
 
 ## Update
+
+When a new version is out, the app asks if you want to update, and the menu
+shows **Update available**. If you built it yourself, update with:
 
 ```console
 git pull
@@ -50,6 +65,8 @@ python3 install.py
 ```
 
 ## Uninstall
+
+If you built it yourself:
 
 ```console
 python3 install.py --uninstall

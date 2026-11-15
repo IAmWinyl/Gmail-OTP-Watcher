@@ -4,6 +4,8 @@ import sys
 import time
 import re
 import json
+import shutil
+import glob
 import traceback
 import unicodedata
 import html as html_lib
@@ -177,10 +179,66 @@ def notify(title, message, details=""):
             body = message + (f"\n\n{details}" if details else "")
             subprocess.run(
                 ["osascript", "-e",
-                 f"display alert {json.dumps(title)} message {json.dumps(body)}"],
+                 f"display alert {_as_str(title)} message {_as_str(body)}"],
                 timeout=3600)
     except Exception as e:
         print(f"(notify failed: {e})")
+
+
+def _as_str(text):
+    """An AppleScript string literal. json.dumps escapes quotes the same way,
+    but AppleScript can't read its \\uXXXX escapes, so keep non-ASCII as is."""
+    return json.dumps(text, ensure_ascii=False)
+
+
+# Windows: run helper PowerShell without flashing a console window.
+_NO_WINDOW = 0x08000000
+
+
+def ask(title, message, yes="OK", no=None):
+    """Blocking question dialog. True if the yes button was pressed. With no
+    second button it's just an acknowledgement. (Windows message boxes can't
+    relabel their buttons, so there it's Yes/No or OK.)"""
+    try:
+        if platform.system() == "Windows":
+            MB_OK, MB_YESNO, MB_ICONINFO, MB_SYSTEMMODAL, IDOK, IDYES = 0, 4, 0x40, 0x1000, 1, 6
+            style = (MB_YESNO if no else MB_OK) | MB_ICONINFO | MB_SYSTEMMODAL
+            return ctypes.windll.user32.MessageBoxW(None, message, title, style) in (IDOK, IDYES)
+        if platform.system() == "Darwin":
+            buttons = [no, yes] if no else [yes]
+            script = (f"display dialog {_as_str(message)} with title {_as_str(title)} "
+                      f"buttons {{{', '.join(_as_str(b) for b in buttons)}}} "
+                      f"default button {_as_str(yes)}")
+            out = subprocess.run(["osascript", "-e", script],
+                                 capture_output=True, text=True, timeout=3600)
+            return out.returncode == 0 and f"button returned:{yes}" in out.stdout
+    except Exception as e:
+        print(f"(dialog failed: {e})")
+    return False
+
+
+def choose_file(prompt):
+    """Native open-file dialog for a .json file. The chosen path, or None."""
+    try:
+        if platform.system() == "Darwin":
+            script = f"POSIX path of (choose file with prompt {_as_str(prompt)} of type {{\"public.json\"}})"
+            out = subprocess.run(["osascript", "-e", script],
+                                 capture_output=True, text=True, timeout=3600)
+        elif platform.system() == "Windows":
+            ps = ("Add-Type -AssemblyName System.Windows.Forms; "
+                  "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+                  f"$d.Title = '{prompt.replace(chr(39), chr(39) * 2)}'; "
+                  "$d.Filter = 'Google client file (*.json)|*.json'; "
+                  "if ($d.ShowDialog() -eq 'OK') { $d.FileName }")
+            out = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
+                                 capture_output=True, text=True, timeout=3600,
+                                 creationflags=_NO_WINDOW)
+        else:
+            return None
+        return out.stdout.strip() or None
+    except Exception as e:
+        print(f"(file picker failed: {e})")
+        return None
 
 
 def describe_failure(exc):
@@ -598,6 +656,37 @@ def get_credentials(token_path, creds_path, scopes):
 
 
 
+def install_client_file(creds_path):
+    """First launch of the packaged app: take the Google OAuth client file
+    (Google names the download client_secret_<id>.json) from the app's own
+    folder, or ask for it with a file picker, and copy it into place."""
+    folders = [app_dir()]
+    if platform.system() == "Darwin":
+        # The folder the .app sits in (sys.executable is inside the bundle).
+        folders.append(os.path.dirname(os.path.abspath(
+            os.path.join(sys.executable, "..", "..", ".."))))
+    found = sorted((p for f in folders for p in glob.glob(os.path.join(f, "client_secret_*.json"))),
+                   key=os.path.getmtime, reverse=True)
+    path = found[0] if found else choose_file(
+        "Choose the OAuth client file (client_secret_....json) you downloaded "
+        "from your Google Cloud project.")
+    if not path:
+        return False
+    try:
+        with open(path) as f:
+            client = json.load(f)
+    except (OSError, ValueError):
+        client = {}
+    if "installed" not in client:
+        notify("That isn't a Desktop app client file",
+               f"{path} isn't an OAuth client of type Desktop app. Create one of "
+               "that type in your Google Cloud project (the README says how), "
+               "then choose Restart watcher in the tray menu.")
+        return False
+    shutil.copy2(path, creds_path)
+    return True
+
+
 def run_watcher(on_state=None):
     """Run the watcher to completion. Reports lifecycle changes through
     on_state(state, detail) so a UI can show them. Returns an exit code."""
@@ -618,7 +707,8 @@ def run_watcher(on_state=None):
 
     try:
         state("starting", "Authorizing with Gmail...")
-        if not os.path.exists(token_path) and not os.path.exists(creds_path):
+        if (not os.path.exists(token_path) and not os.path.exists(creds_path)
+                and not (FROZEN and install_client_file(creds_path))):
             failure = ("OTP Watcher can't sign in: credentials.json is missing",
                        "Gmail access needs the OAuth client file from your own "
                        "Google Cloud project, and it isn't there.\n\n"
@@ -664,6 +754,11 @@ def run_watcher(on_state=None):
 
 
 def main():
+    if FROZEN and platform.system() == "Windows" and "--uninstall" in sys.argv:
+        # Before logging and the instance lock: both would hold files open
+        # that the uninstall needs to delete.
+        import windows_uninstall
+        sys.exit(windows_uninstall.uninstall())
     setup_logging()
     ensure_single_instance()
     if TRAY:

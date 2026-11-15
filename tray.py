@@ -7,13 +7,18 @@ this, a dead watcher looks exactly like a quiet one.
 import os
 import sys
 import threading
+import time
 import subprocess
 import platform
 
 import pystray
 from PIL import Image, ImageDraw
 
-from main import app_dir
+import autostart
+import updater
+from main import app_dir, ask, log, notify
+
+UPDATE_CHECK_SECONDS = 24 * 3600
 
 HERE = app_dir()
 LOG_PATH = os.path.join(HERE, "otp_watcher.log")
@@ -91,14 +96,68 @@ def run(run_watcher, show_failure):
         icon.title = head + (chr(10) + _clip(detail, 120 - len(head)) if detail else "")
         icon.update_menu()
 
-    def set_state(name, detail="", failure=None):
+    def on_main(fn, *args):
         if platform.system() == "Darwin":
             # AppKit kills the process if the menu bar is touched off the main
-            # thread, and the watcher reports from its worker thread.
+            # thread, and the watcher and update checks run on their own.
             from PyObjCTools import AppHelper
-            AppHelper.callAfter(apply_state, name, detail, failure)
+            AppHelper.callAfter(fn, *args)
         else:
-            apply_state(name, detail, failure)
+            fn(*args)
+
+    def set_state(name, detail="", failure=None):
+        on_main(apply_state, name, detail, failure)
+
+    update = {"release": None}
+
+    def update_now(release):
+        try:
+            updater.apply(release)
+        except Exception as e:
+            log.error(f"Update failed: {e}")
+            notify("OTP Watcher couldn't update",
+                   f"{e}\n\nIt's still running version {updater.VERSION}.")
+            return
+        on_main(icon.stop)  # the new version starts once this one exits
+
+    def offer_update(release, asked_from_menu=False):
+        tag = release["tag_name"]
+        if not updater.RELEASE:
+            ask("OTP Watcher update",
+                f"OTP Watcher {tag} is out (you have {updater.VERSION}). To update, "
+                "pull the latest code and run install.py again.")
+        elif asked_from_menu or ask(
+                "OTP Watcher update",
+                f"OTP Watcher {tag} is available (you have {updater.VERSION}). "
+                "Update now? It restarts on its own afterwards.",
+                yes="Update", no="Later"):
+            update_now(release)
+
+    def check_for_updates():
+        while True:
+            try:
+                release = updater.newer_release()
+            except Exception as e:
+                log.info(f"Update check failed: {e}")
+                release = None
+            if release:
+                update["release"] = release
+                on_main(icon.update_menu)
+                offer_update(release)
+            time.sleep(UPDATE_CHECK_SECONDS)
+
+    def update_text(_):
+        release = update["release"]
+        return f"Update available: {release['tag_name']}" if release else ""
+
+    def on_update(_):
+        release = update["release"]
+        if release:
+            threading.Thread(target=offer_update, args=(release, True), daemon=True).start()
+
+    def on_start_at_login(_):
+        autostart.turn_off() if autostart.is_on() else autostart.turn_on()
+        icon.update_menu()
 
     def start_worker():
         def body():
@@ -140,10 +199,23 @@ def run(run_watcher, show_failure):
         pystray.MenuItem("Why it stopped...", on_show_error, visible=has_failure),
         pystray.MenuItem("Open log", lambda _: _open_log()),
         pystray.MenuItem("Restart watcher", on_restart, visible=can_restart),
+        pystray.MenuItem(update_text, on_update, visible=lambda _: update["release"] is not None),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Start at login", on_start_at_login,
+                         checked=lambda _: autostart.is_on(),
+                         visible=getattr(sys, "frozen", False)),
         pystray.MenuItem("Quit", on_quit),
     )
 
+    updater.cleanup()
+    autostart.sync()
+    if getattr(sys, "frozen", False) and platform.system() == "Windows":
+        try:
+            import windows_uninstall
+            windows_uninstall.register()
+        except Exception as e:
+            log.info(f"Couldn't add to Installed apps: {e}")
+    threading.Thread(target=check_for_updates, daemon=True).start()
     start_worker()
     icon.run()  # blocks on the main thread until Quit
     return result["code"]

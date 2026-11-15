@@ -1,0 +1,47 @@
+# Push a tag like v1.2.0 to build the macOS (both chips) and Windows apps and
+# publish them as a GitHub release, which installed copies offer to update to.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-15, macos-15-intel, windows-latest]  # Apple Silicon, Intel, Windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # build.py reads the version from the tag
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - run: python -m pip install -r requirements.txt pyinstaller
+      - run: python build.py --release
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent "dist/OTP Watcher.app" "OTP-Watcher-macos-$(uname -m).zip"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item "dist/OTP Watcher.exe" OTP-Watcher-windows.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.os }}
+          path: OTP-Watcher-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" OTP-Watcher-* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
