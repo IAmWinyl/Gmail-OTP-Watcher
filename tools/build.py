@@ -65,7 +65,19 @@ def write_version(release):
     return path
 
 
+def require_tk():
+    """The setup window needs Tk. Python usually includes it, but Homebrew's
+    doesn't, and without it the app would build fine and then fail to open."""
+    import importlib.util
+    if importlib.util.find_spec("_tkinter") is None:
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        sys.exit("This Python doesn't include Tk, which the setup window needs.\n"
+                 f"With Homebrew on macOS: brew install python-tk@{version}\n"
+                 "On Windows: rerun the Python installer and turn on tcl/tk.")
+
+
 def main():
+    require_tk()
     release = "--release" in sys.argv
     icon = make_icon()
     version_file = write_version(release)

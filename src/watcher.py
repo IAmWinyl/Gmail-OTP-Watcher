@@ -2,12 +2,7 @@
 to the clipboard with a chime while you're at the computer."""
 import base64
 import email
-import glob
-import json
 import os
-import platform
-import shutil
-import sys
 import time
 import traceback
 
@@ -20,7 +15,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from extract import decode_hdr, extract_code, get_bodies
-from system.dialogs import choose_file, describe_failure, notify
+from system.dialogs import describe_failure, notify
 from system.idle import idle_seconds
 from system.logs import log
 from system.runtime import FROZEN, app_dir
@@ -154,66 +149,44 @@ def poll_for_new_emails(creds):
             time.sleep(2)
 
 
-def get_credentials(token_path, creds_path, scopes):
-    """Load/refresh credentials. Waits out transient network failures (e.g.
-    DNS not up yet right after boot) instead of crashing. Permanent failures
-    (invalid_scope / invalid_grant) raise RefreshError."""
-    creds = None
-    if os.path.exists(token_path):
-        # NOTE: delete token.json and regenerate it if you change SCOPES
-        creds = Credentials.from_authorized_user_file(token_path, scopes)
-    if creds and creds.valid:
-        return creds
-    if creds and creds.expired and creds.refresh_token:
-        with_network_retry(lambda: creds.refresh(Request()), "Token refresh")
-    else:
-        if FROZEN:
-            # The packaged app has no console to print the consent URL to,
-            # so drive the browser directly and say why it just opened --
-            # otherwise first run hangs invisibly on the OAuth prompt.
-            notify("OTP Watcher needs to sign in",
-                   "No saved Gmail authorization was found, so your browser "
-                   "is opening so you can grant access.\n\n"
-                   "This happens once. "
-                   "After you approve, the watcher starts on its own and the "
-                   "tray icon turns green.")
-        flow = InstalledAppFlow.from_client_secrets_file(creds_path, scopes)
-        creds = flow.run_local_server(port=54461, open_browser=FROZEN)
+SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+
+
+def paths():
+    """(token.json, credentials.json) in app_dir(), not the CWD, which is
+    System32 or / when launched at login."""
+    here = app_dir()
+    return os.path.join(here, "token.json"), os.path.join(here, "credentials.json")
+
+
+def sign_in(creds_path, token_path, open_browser=False, success_message=None):
+    """Run Google's browser consent flow and save the resulting token. Without
+    open_browser it prints the link instead (a terminal run)."""
+    flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+    kwargs = {"success_message": success_message} if success_message else {}
+    creds = flow.run_local_server(port=54461, open_browser=open_browser, **kwargs)
     with open(token_path, "w") as token:
         token.write(creds.to_json())
     return creds
 
 
-
-def install_client_file(creds_path):
-    """First launch of the packaged app: take the Google OAuth client file
-    (Google names the download client_secret_<id>.json) from the app's own
-    folder, or ask for it with a file picker, and copy it into place."""
-    folders = [app_dir()]
-    if platform.system() == "Darwin":
-        # The folder the .app sits in (sys.executable is inside the bundle).
-        folders.append(os.path.dirname(os.path.abspath(
-            os.path.join(sys.executable, "..", "..", ".."))))
-    found = sorted((p for f in folders for p in glob.glob(os.path.join(f, "client_secret_*.json"))),
-                   key=os.path.getmtime, reverse=True)
-    path = found[0] if found else choose_file(
-        "Choose the OAuth client file (client_secret_....json) you downloaded "
-        "from your Google Cloud project.")
-    if not path:
-        return False
-    try:
-        with open(path) as f:
-            client = json.load(f)
-    except (OSError, ValueError):
-        client = {}
-    if "installed" not in client:
-        notify("That isn't a Desktop app client file",
-               f"{path} isn't an OAuth client of type Desktop app. Create one of "
-               "that type in your Google Cloud project (the README says how), "
-               "then choose Restart watcher in the tray menu.")
-        return False
-    shutil.copy2(path, creds_path)
-    return True
+def get_credentials(token_path, creds_path):
+    """Load/refresh credentials, or sign in from the terminal on a source run
+    with no token yet. Waits out transient network failures (e.g. DNS not up
+    yet right after boot) instead of crashing. Permanent failures
+    (invalid_scope / invalid_grant) raise RefreshError."""
+    creds = None
+    if os.path.exists(token_path):
+        # NOTE: delete token.json and regenerate it if you change SCOPES
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    if creds and creds.valid:
+        return creds
+    if creds and creds.expired and creds.refresh_token:
+        with_network_retry(lambda: creds.refresh(Request()), "Token refresh")
+        with open(token_path, "w") as token:
+            token.write(creds.to_json())
+        return creds
+    return sign_in(creds_path, token_path)
 
 
 def run_watcher(on_state=None):
@@ -223,32 +196,32 @@ def run_watcher(on_state=None):
         if on_state:
             on_state(name, detail, failure)
 
-    SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-    # Resolve paths from app_dir(), not the CWD, which is System32 or / when
-    # launched at login.
-    here = app_dir()
-    token_path = os.path.join(here, "token.json")
-    creds_path = os.path.join(here, "credentials.json")
+    token_path, creds_path = paths()
     if FROZEN:
-        sign_in_again = "then choose Restart watcher in the tray menu to sign in again."
+        # The setup window handles signing in, and it opens on the next launch
+        # whenever there's no saved sign-in.
+        sign_in_again = "Quit OTP Watcher from its menu and open it again to sign back in."
     else:
-        sign_in_again = "then run src/main.py once by hand to sign in again."
+        sign_in_again = "Run src/main.py again to sign back in."
 
     try:
         state("starting", "Authorizing with Gmail...")
-        if (not os.path.exists(token_path) and not os.path.exists(creds_path)
-                and not (FROZEN and install_client_file(creds_path))):
-            failure = ("OTP Watcher can't sign in: credentials.json is missing",
-                       "Gmail access needs the OAuth client file from your own "
-                       "Google Cloud project, and it isn't there.\n\n"
-                       f"Put it at:\n{creds_path}\n\n"
-                       "The README's Google API setup section says how to get it. "
-                       "Then restart the watcher.",
-                       "")
-            state("failed", "credentials.json is missing", failure)
+        if not os.path.exists(token_path) and (FROZEN or not os.path.exists(creds_path)):
+            if FROZEN:
+                failure = ("OTP Watcher isn't signed in to Gmail",
+                           "Quit OTP Watcher from its menu and open it again to "
+                           "set it up.", "")
+            else:
+                failure = ("OTP Watcher can't sign in: credentials.json is missing",
+                           "Gmail access needs the OAuth client file from your own "
+                           "Google Cloud project, and it isn't there.\n\n"
+                           f"Put it at:\n{creds_path}\n\n"
+                           "The README's Google API setup section says how to get it. "
+                           "Then restart the watcher.", "")
+            state("failed", "not signed in", failure)
             notify(*failure)
             return EXIT_NEEDS_HUMAN
-        creds = get_credentials(token_path, creds_path, SCOPES)
+        creds = get_credentials(token_path, creds_path)
         print("Started Gmail agent, monitoring")
         state("running", "Watching for OTP emails.")
         poll_for_new_emails(creds)
@@ -259,11 +232,16 @@ def run_watcher(on_state=None):
         return EXIT_NEEDS_HUMAN
     except RefreshError as e:
         print(f"Auth failure: {e}")
+        # The saved sign-in is permanently rejected, so drop it: the next
+        # launch then signs in fresh instead of failing the same way.
+        try:
+            os.remove(token_path)
+        except OSError:
+            pass
         reason, details = describe_failure(e)
         failure = ("OTP Watcher stopped: Gmail sign-in expired",
-                   "Gmail authorization failed, so OTP codes are NOT being copied.\n\n"
-                   f"Reason: {reason}\n\n"
-                   f"Fix: delete {token_path}, {sign_in_again}",
+                   "Gmail stopped accepting the saved sign-in, so OTP codes are NOT "
+                   f"being copied.\n\nReason: {reason}\n\n{sign_in_again}",
                    details)
         state("failed", reason, failure)
         notify(*failure)

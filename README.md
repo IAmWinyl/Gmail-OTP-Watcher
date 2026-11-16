@@ -37,8 +37,9 @@ walks through these steps with screenshots.
   from there at every login) and run it. If SmartScreen stops it, choose
   **More info > Run anyway**.
 
-**Or build it yourself** (needs Python 3). Put the `client_secret_*.json` in
-the project folder first and it'll skip asking for it:
+**Or build it yourself** (needs Python 3 with Tk; Homebrew's Python needs
+`brew install python-tk@3.14`, matching your Python version). Put the
+`client_secret_*.json` in the project folder first and it'll skip asking for it:
 
 ```console
 git clone https://github.com/IAmWinyl/Gmail-OTP-Watcher.git
@@ -48,11 +49,10 @@ python3 install.py
 
 (On Windows, `py install.py`.)
 
-On first launch it asks you to choose the `client_secret_*.json` you
-downloaded, then your browser opens so you can let it read your Gmail. Google
-warns that the app isn't verified, since it's your own project: choose
-**Advanced**, then **Go to ... (unsafe)**. After that the icon turns green, and
-it starts at every login.
+On first launch a setup window walks you through choosing the
+`client_secret_*.json` you downloaded and signing in to Gmail in your browser.
+After that it lives in your menu bar (or notification area on Windows) and
+starts at every login.
 
 ## Update
 

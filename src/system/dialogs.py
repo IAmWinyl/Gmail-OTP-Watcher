@@ -1,12 +1,10 @@
-"""Native dialogs: failure alerts, yes/no questions and the file picker."""
+"""Native dialogs: failure alerts and yes/no questions."""
 import ctypes
 import json
 import platform
 import re
 import subprocess
 import traceback
-
-from system.runtime import NO_WINDOW
 
 
 if platform.system() == "Windows":
@@ -138,30 +136,6 @@ def ask(title, message, yes="OK", no=None):
     except Exception as e:
         print(f"(dialog failed: {e})")
     return False
-
-
-def choose_file(prompt):
-    """Native open-file dialog for a .json file. The chosen path, or None."""
-    try:
-        if platform.system() == "Darwin":
-            script = f"POSIX path of (choose file with prompt {_as_str(prompt)} of type {{\"public.json\"}})"
-            out = subprocess.run(["osascript", "-e", script],
-                                 capture_output=True, text=True, timeout=3600)
-        elif platform.system() == "Windows":
-            ps = ("Add-Type -AssemblyName System.Windows.Forms; "
-                  "$d = New-Object System.Windows.Forms.OpenFileDialog; "
-                  f"$d.Title = '{prompt.replace(chr(39), chr(39) * 2)}'; "
-                  "$d.Filter = 'Google client file (*.json)|*.json'; "
-                  "if ($d.ShowDialog() -eq 'OK') { $d.FileName }")
-            out = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
-                                 capture_output=True, text=True, timeout=3600,
-                                 creationflags=NO_WINDOW)
-        else:
-            return None
-        return out.stdout.strip() or None
-    except Exception as e:
-        print(f"(file picker failed: {e})")
-        return None
 
 
 def describe_failure(exc):

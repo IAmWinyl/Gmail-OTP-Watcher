@@ -27,7 +27,6 @@ CACHE = os.path.join(HERE, ".eval_cache")
 RAW = os.path.join(CACHE, "raw")
 RESULTS = os.path.join(CACHE, "results.json")
 PREV = os.path.join(CACHE, "results.prev.json")
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 LABELS = {"OTP": "otp", "OTP/False Positives": "false_positive"}
 
 
@@ -70,7 +69,7 @@ def context(bodies, found):
 def evaluate(days):
     os.makedirs(RAW, exist_ok=True)
     creds = watcher.get_credentials(os.path.join(HERE, "token.json"),
-                                 os.path.join(HERE, "credentials.json"), SCOPES)
+                                    os.path.join(HERE, "credentials.json"))
     svc = build("gmail", "v1", credentials=creds)
 
     tagged = {}

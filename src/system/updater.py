@@ -32,7 +32,13 @@ def _git(*args):
 def from_git():
     """(version, "owner/repo") from the checkout: the nearest release tag and
     the GitHub repo it was cloned from. Either can be None."""
-    version = _git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*")
+    # Highest release tag on this exact commit first: git describe picks an
+    # arbitrary one when a commit has several (v1.0.4 and v1.0.5 on the same
+    # code), and a build stamped with the lower one keeps offering the update
+    # it already is.
+    on_head = _git("tag", "--points-at", "HEAD", "--list", "v[0-9]*", "--sort=-version:refname")
+    version = (on_head.split() or [None])[0] if on_head else None
+    version = version or _git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*")
     m = re.search(r"github\.com[:/](.+?/.+?)(?:\.git)?/?$", _git("remote", "get-url", "origin") or "")
     return version, (m.group(1) if m else None)
 

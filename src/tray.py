@@ -78,23 +78,17 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def run(run_watcher, show_failure):
-    """Show the tray icon and run the watcher beneath it. Returns an exit code.
-
-    show_failure(heading, message, details) re-opens the error dialog on demand,
-    so the reason stays reachable after the first popup is dismissed.
-    """
+def run(run_watcher):
+    """Show the tray icon and run the watcher beneath it. Returns an exit code."""
     result = {"code": 0}
-    state = {"name": "starting", "detail": "", "failure": None}
+    state = {"name": "starting", "detail": ""}
     worker = {"thread": None}
 
     icon = pystray.Icon("otp_watcher", _icon_image(STATES["starting"][0]),
                         "OTP Watcher - Starting...")
 
-    def apply_state(name, detail, failure):
+    def apply_state(name, detail):
         state["name"], state["detail"] = name, detail
-        if failure or name != "failed":
-            state["failure"] = failure  # a clean restart clears the old reason
         color, label = STATES.get(name, STATES["stopped"])
         icon.icon = _icon_image(color, alert=(name == "failed"))
         # Windows caps the tooltip near 128 chars, so trim the reason to fit.
@@ -111,8 +105,14 @@ def run(run_watcher, show_failure):
         else:
             fn(*args)
 
+    # Set once the watcher has finished starting (running or failed), so an
+    # update question never lands in the middle of first-launch setup.
+    settled = threading.Event()
+
     def set_state(name, detail="", failure=None):
-        on_main(apply_state, name, detail, failure)
+        on_main(apply_state, name, detail)
+        if name != "starting":
+            settled.set()
 
     update = {"release": None}
 
@@ -140,6 +140,7 @@ def run(run_watcher, show_failure):
             update_now(release)
 
     def check_for_updates():
+        settled.wait()
         while True:
             last_check = time.time()
             try:
@@ -176,22 +177,11 @@ def run(run_watcher, show_failure):
 
     def status_text(_):
         label = STATES.get(state["name"], STATES["stopped"])[1]
-        line = "OTP Watcher: " + label
-        return line + (" - " + _clip(state["detail"], 60) if state["detail"] else "")
+        return "OTP Watcher: " + label
 
     def can_restart(_):
         t = worker["thread"]
         return t is None or not t.is_alive()
-
-    def has_failure(_):
-        return state["failure"] is not None
-
-    def on_show_error(_):
-        # The dialog blocks its thread, so keep it off the tray's thread.
-        failure = state["failure"]
-        if failure:
-            threading.Thread(target=lambda: show_failure(*failure),
-                             daemon=True).start()
 
     def on_restart(_):
         if can_restart(None):
@@ -204,7 +194,6 @@ def run(run_watcher, show_failure):
     icon.menu = pystray.Menu(
         pystray.MenuItem(status_text, None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Why it stopped...", on_show_error, visible=has_failure),
         pystray.MenuItem("Open log", lambda _: _open_log()),
         pystray.MenuItem("Restart watcher", on_restart, visible=can_restart),
         pystray.MenuItem(update_text, on_update, visible=lambda _: update["release"] is not None),
@@ -223,6 +212,7 @@ def run(run_watcher, show_failure):
             windows_uninstall.register()
         except Exception as e:
             log.info(f"Couldn't add to Installed apps: {e}")
+
     def setup(icon):
         # Start the watcher only once the icon is showing: on Windows, a state
         # change that lands while it's still appearing is lost, and the dot

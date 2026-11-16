@@ -6,7 +6,6 @@ and --debug to also log each email's sender and subject and the codes copied.
 import platform
 import sys
 
-from system.dialogs import notify
 from system.logs import setup_logging
 from system.runtime import FROZEN, TRAY
 from system.single_instance import ensure_single_instance
@@ -22,8 +21,11 @@ def main():
     setup_logging()
     ensure_single_instance()
     if TRAY:
+        import setup_window
+        if setup_window.needed() and not setup_window.run():
+            sys.exit(0)  # closed before finishing; it opens again next launch
         import tray
-        sys.exit(tray.run(run_watcher, notify))
+        sys.exit(tray.run(run_watcher))
     sys.exit(run_watcher())
 
 
